@@ -1,6 +1,7 @@
 // Schema search index builder (stored alongside SchemaGraph for fast lookups).
 
 import type { SchemaGraph } from "../types/schema-graph";
+import { foldKey } from "../types/schema-graph";
 import type { SnapshotIndex } from "../storage/db";
 
 export function buildIndex(graph: SchemaGraph): SnapshotIndex {
@@ -38,8 +39,13 @@ export function lookupSchemas(graph: SchemaGraph, prefix: string): string[] {
   return Object.values(graph.schemas).filter((s) => s.name.toLowerCase().startsWith(lower)).map((s) => s.name);
 }
 
-export function getRelation(graph: SchemaGraph, schema: string, name: string) {
-  return graph.schemas[schema.toLowerCase()]?.relations[`${schema.toLowerCase()}.${name.toLowerCase()}`] ?? null;
+export function getRelation(graph: SchemaGraph, schema: string, name: string, schemaQuoted = false, nameQuoted = false) {
+  // Folded keys keep unquoted identifiers lowercase while preserving the case
+  // of double-quoted identifiers (PostgreSQL rule). Defaulting quoted to false
+  // reproduces the previous unquoted-only behavior for existing callers.
+  const sk = foldKey(schema, schemaQuoted);
+  const nk = foldKey(name, nameQuoted);
+  return graph.schemas[sk]?.relations[`${sk}.${nk}`] ?? null;
 }
 
 export function getRelationByKey(graph: SchemaGraph, qualifiedKey: string) {

@@ -962,8 +962,11 @@ function normalizeType(type) {
 }
 
 // src/types/schema-graph.ts
-function relationKey(schema, name) {
-  return `${schema.toLowerCase()}.${name.toLowerCase()}`;
+function foldKey(name, quoted) {
+  return quoted ? name : name.toLowerCase();
+}
+function relationKey(schema, name, schemaQuoted = false, nameQuoted = false) {
+  return `${foldKey(schema, schemaQuoted)}.${foldKey(name, nameQuoted)}`;
 }
 
 // src/lib/jsonb-parser.ts
@@ -1188,7 +1191,7 @@ function parseStatement(stmt, ctx) {
   else if (kw === "ALTER") parseAlter(stmt, ctx);
   else if (kw === "COMMENT") parseComment(stmt, ctx);
   else if (kw === "SET" || kw === "SELECT" || kw === "INSERT" || kw === "UPDATE" || kw === "DELETE") {
-  } else if (kw === "GRANT" || kw === "REVOKE" || kw === "REVOKE") {
+  } else if (kw === "GRANT" || kw === "REVOKE") {
   } else {
     ctx.warnings.push({
       line: stmt[0]?.line ?? 0,
@@ -1271,7 +1274,7 @@ function parseCreateTable(stmt, start, ctx) {
     kind: "table",
     schema: schema.name,
     name: relName,
-    key: relationKey(schema.name, relName),
+    key: relationKey(schema.name, relName, schema.quoted, relQuoted),
     quoted: relQuoted,
     columns: [],
     primaryKey: [],
@@ -1281,7 +1284,7 @@ function parseCreateTable(stmt, start, ctx) {
   schema.relations[table.key] = table;
   parseTableBody(innerTokens, table, ctx);
   for (const col of table.columns) {
-    if (table.primaryKey.includes(col.name)) col.isPrimaryKey = true;
+    if (table.primaryKey.some((pk) => pk.toLowerCase() === col.key.toLowerCase())) col.isPrimaryKey = true;
   }
 }
 function parseCreateRelation(stmt, start, kind, ctx) {
@@ -1294,7 +1297,7 @@ function parseCreateRelation(stmt, start, kind, ctx) {
     kind,
     schema: schema.name,
     name: relName,
-    key: relationKey(schema.name, relName),
+    key: relationKey(schema.name, relName, schema.quoted, relQuoted),
     quoted: relQuoted,
     columns: [],
     primaryKey: [],
@@ -1348,7 +1351,7 @@ function parseColumnDef(item, table, ctx) {
   const { baseType, isArray } = normalizeType(dataType);
   const col = {
     name,
-    key: name.toLowerCase(),
+    key: foldKey(name, quoted),
     quoted,
     dataType,
     baseType: isArray ? `${baseType}[]` : baseType,
@@ -1518,8 +1521,7 @@ function findColumnOptionStart(item, from) {
     "CHECK",
     "GENERATED",
     "COLLATE",
-    "CONSTRAINT",
-    "REFERENCES"
+    "CONSTRAINT"
   ]);
   let depth = 0;
   for (let i = from; i < item.length; i++) {
@@ -1781,7 +1783,7 @@ function readQualifiedName(stmt, from, ctx) {
   return { schemaName, relName, schemaQuoted, relQuoted, end: i };
 }
 function ensureSchema(graph, name, quoted) {
-  const key = name.toLowerCase();
+  const key = foldKey(name, quoted);
   let s = graph.schemas[key];
   if (!s) {
     s = { name, key, quoted, relations: {} };

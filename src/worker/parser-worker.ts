@@ -92,7 +92,7 @@ server.handle("resolve-hover", async (req) => {
 
 server.handle("jsonb-tree", async (req) => {
   if (!activeGraph) return { paths: [] as JsonbPathNode[] };
-  const [schema, table] = req.relationKey.toLowerCase().split(".");
+  const [schema] = req.relationKey.toLowerCase().split(".");
   const rel = activeGraph.schemas[schema ?? ""]?.relations[req.relationKey.toLowerCase()] ?? null;
   if (!rel) return { paths: [] };
   const col = rel.columns.find((c) => c.key === req.column.toLowerCase());

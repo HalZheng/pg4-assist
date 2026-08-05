@@ -94,11 +94,21 @@ export interface FunctionNode {
   quoted: boolean;
 }
 
-/** Normalized lookup helpers for PostgreSQL identifier rules (SPEC §5.2). */
+/** Normalized lookup helpers for PostgreSQL identifier rules (SPEC §5.2).
+ *
+ * PostgreSQL folds UNQUOTED identifiers to lowercase, but DOUBLE-QUOTED
+ * identifiers ("MyCol") keep their case exactly. `foldKey` is the single
+ * canonical place that implements this rule; every key in the graph is
+ * derived from it so lookups stay consistent.
+ */
+export function foldKey(name: string, quoted: boolean): string {
+  return quoted ? name : name.toLowerCase();
+}
+
 export function normalizeIdentifier(raw: string, quoted: boolean): { name: string; key: string; quoted: boolean } {
   return {
     name: raw,
-    key: quoted ? raw.toLowerCase() : raw.toLowerCase(),
+    key: foldKey(raw, quoted),
     quoted,
   };
 }
@@ -112,6 +122,6 @@ export function identifierMatches(storedName: string, storedQuoted: boolean, que
   return storedName.toLowerCase() === q;
 }
 
-export function relationKey(schema: string, name: string): string {
-  return `${schema.toLowerCase()}.${name.toLowerCase()}`;
+export function relationKey(schema: string, name: string, schemaQuoted = false, nameQuoted = false): string {
+  return `${foldKey(schema, schemaQuoted)}.${foldKey(name, nameQuoted)}`;
 }

@@ -16,7 +16,7 @@ import type { DdlParseResult, DdlWarning } from "../types/editor";
 import type { Token } from "./sql-tokenizer";
 import { tokenize, significantTokens, splitStatements } from "./sql-tokenizer";
 import { normalizeType } from "./sql-reference";
-import { relationKey } from "../types/schema-graph";
+import { relationKey, foldKey } from "../types/schema-graph";
 import { extractJsonbAnnotations, buildJsonbTree } from "./jsonb-parser";
 
 export const DDL_PARSER_VERSION = 1;
@@ -128,7 +128,7 @@ function parseStatement(stmt: Token[], ctx: ParseContext): void {
   else if (kw === "COMMENT") parseComment(stmt, ctx);
   else if (kw === "SET" || kw === "SELECT" || kw === "INSERT" || kw === "UPDATE" || kw === "DELETE") {
     // session settings / pg_dump internals — ignore silently
-  } else if (kw === "GRANT" || kw === "REVOKE" || kw === "REVOKE") {
+  } else if (kw === "GRANT" || kw === "REVOKE") {
     // privileges — ignore
   } else {
     // unknown leading keyword — warn but continue
@@ -222,7 +222,7 @@ function parseCreateTable(stmt: Token[], start: number, ctx: ParseContext): void
     kind: "table",
     schema: schema.name,
     name: relName,
-    key: relationKey(schema.name, relName),
+    key: relationKey(schema.name, relName, schema.quoted, relQuoted),
     quoted: relQuoted,
     columns: [],
     primaryKey: [],
@@ -232,9 +232,11 @@ function parseCreateTable(stmt: Token[], start: number, ctx: ParseContext): void
   schema.relations[table.key] = table;
 
   parseTableBody(innerTokens, table, ctx);
-  // apply primary key flags from PK list
+  // apply primary key flags from PK list (case-insensitive: PG folds unquoted
+  // identifiers, but a table-level constraint may reference the column in a
+  // different casing than the column definition — compare folded keys).
   for (const col of table.columns) {
-    if (table.primaryKey.includes(col.name)) col.isPrimaryKey = true;
+    if (table.primaryKey.some((pk) => pk.toLowerCase() === col.key.toLowerCase())) col.isPrimaryKey = true;
   }
 }
 
@@ -253,7 +255,7 @@ function parseCreateRelation(
     kind,
     schema: schema.name,
     name: relName,
-    key: relationKey(schema.name, relName),
+    key: relationKey(schema.name, relName, schema.quoted, relQuoted),
     quoted: relQuoted,
     columns: [],
     primaryKey: [],
@@ -316,7 +318,7 @@ function parseColumnDef(item: Token[], table: TableNode, ctx: ParseContext): voi
 
   const col: ColumnNode = {
     name,
-    key: name.toLowerCase(),
+    key: foldKey(name, quoted),
     quoted,
     dataType,
     baseType: isArray ? `${baseType}[]` : baseType,
@@ -509,7 +511,7 @@ function skipParen(stmt: Token[], start: number): number {
 function findColumnOptionStart(item: Token[], from: number): number {
   const stopKws = new Set([
     "NOT", "NULL", "DEFAULT", "PRIMARY", "UNIQUE", "REFERENCES", "FOREIGN",
-    "CHECK", "GENERATED", "COLLATE", "CONSTRAINT", "REFERENCES",
+    "CHECK", "GENERATED", "COLLATE", "CONSTRAINT",
   ]);
   let depth = 0;
   for (let i = from; i < item.length; i++) {
@@ -799,7 +801,7 @@ function readQualifiedName(
 }
 
 function ensureSchema(graph: SchemaGraph, name: string, quoted: boolean): SchemaNode {
-  const key = name.toLowerCase();
+  const key = foldKey(name, quoted);
   let s = graph.schemas[key];
   if (!s) {
     s = { name, key, quoted, relations: {} };

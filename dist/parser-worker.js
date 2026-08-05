@@ -812,8 +812,11 @@ function typesComparable(a, b) {
 }
 
 // src/types/schema-graph.ts
-function relationKey(schema, name) {
-  return `${schema.toLowerCase()}.${name.toLowerCase()}`;
+function foldKey(name, quoted) {
+  return quoted ? name : name.toLowerCase();
+}
+function relationKey(schema, name, schemaQuoted = false, nameQuoted = false) {
+  return `${foldKey(schema, schemaQuoted)}.${foldKey(name, nameQuoted)}`;
 }
 
 // src/lib/jsonb-parser.ts
@@ -1038,7 +1041,7 @@ function parseStatement(stmt, ctx) {
   else if (kw === "ALTER") parseAlter(stmt, ctx);
   else if (kw === "COMMENT") parseComment(stmt, ctx);
   else if (kw === "SET" || kw === "SELECT" || kw === "INSERT" || kw === "UPDATE" || kw === "DELETE") {
-  } else if (kw === "GRANT" || kw === "REVOKE" || kw === "REVOKE") {
+  } else if (kw === "GRANT" || kw === "REVOKE") {
   } else {
     ctx.warnings.push({
       line: stmt[0]?.line ?? 0,
@@ -1121,7 +1124,7 @@ function parseCreateTable(stmt, start, ctx) {
     kind: "table",
     schema: schema.name,
     name: relName,
-    key: relationKey(schema.name, relName),
+    key: relationKey(schema.name, relName, schema.quoted, relQuoted),
     quoted: relQuoted,
     columns: [],
     primaryKey: [],
@@ -1131,7 +1134,7 @@ function parseCreateTable(stmt, start, ctx) {
   schema.relations[table.key] = table;
   parseTableBody(innerTokens, table, ctx);
   for (const col of table.columns) {
-    if (table.primaryKey.includes(col.name)) col.isPrimaryKey = true;
+    if (table.primaryKey.some((pk) => pk.toLowerCase() === col.key.toLowerCase())) col.isPrimaryKey = true;
   }
 }
 function parseCreateRelation(stmt, start, kind, ctx) {
@@ -1144,7 +1147,7 @@ function parseCreateRelation(stmt, start, kind, ctx) {
     kind,
     schema: schema.name,
     name: relName,
-    key: relationKey(schema.name, relName),
+    key: relationKey(schema.name, relName, schema.quoted, relQuoted),
     quoted: relQuoted,
     columns: [],
     primaryKey: [],
@@ -1198,7 +1201,7 @@ function parseColumnDef(item, table, ctx) {
   const { baseType, isArray } = normalizeType(dataType);
   const col = {
     name,
-    key: name.toLowerCase(),
+    key: foldKey(name, quoted),
     quoted,
     dataType,
     baseType: isArray ? `${baseType}[]` : baseType,
@@ -1368,8 +1371,7 @@ function findColumnOptionStart(item, from) {
     "CHECK",
     "GENERATED",
     "COLLATE",
-    "CONSTRAINT",
-    "REFERENCES"
+    "CONSTRAINT"
   ]);
   let depth = 0;
   for (let i = from; i < item.length; i++) {
@@ -1631,7 +1633,7 @@ function readQualifiedName(stmt, from, ctx) {
   return { schemaName, relName, schemaQuoted, relQuoted, end: i };
 }
 function ensureSchema(graph, name, quoted) {
-  const key = name.toLowerCase();
+  const key = foldKey(name, quoted);
   let s = graph.schemas[key];
   if (!s) {
     s = { name, key, quoted, relations: {} };
@@ -1708,8 +1710,10 @@ function lookupSchemas(graph, prefix) {
   const lower = prefix.toLowerCase();
   return Object.values(graph.schemas).filter((s) => s.name.toLowerCase().startsWith(lower)).map((s) => s.name);
 }
-function getRelation(graph, schema, name) {
-  return graph.schemas[schema.toLowerCase()]?.relations[`${schema.toLowerCase()}.${name.toLowerCase()}`] ?? null;
+function getRelation(graph, schema, name, schemaQuoted = false, nameQuoted = false) {
+  const sk = foldKey(schema, schemaQuoted);
+  const nk = foldKey(name, nameQuoted);
+  return graph.schemas[sk]?.relations[`${sk}.${nk}`] ?? null;
 }
 
 // src/lib/context-parser.ts
@@ -1856,7 +1860,7 @@ function parseRelationRef(stmt, from, graph, cteColumns) {
   const relTok = stmt[from + 2];
   if (dotTok && dotTok.text === "." && relTok && (relTok.type === "identifier" || relTok.type === "quoted-identifier")) {
     const relName = relTok.value ?? relTok.text;
-    const rel = graph ? getRelation(graph, firstName, relName) : null;
+    const rel = graph ? getRelation(graph, firstName, relName, t.type === "quoted-identifier", relTok.type === "quoted-identifier") : null;
     return {
       key: `${firstName.toLowerCase()}.${relName.toLowerCase()}`,
       schema: firstName,
@@ -1876,7 +1880,7 @@ function parseRelationRef(stmt, from, graph, cteColumns) {
     };
   }
   if (graph) {
-    const rel = getRelation(graph, "public", firstName);
+    const rel = getRelation(graph, "public", firstName, false, t.type === "quoted-identifier");
     if (rel) {
       return {
         key: `public.${bareKey}`,
@@ -1887,7 +1891,7 @@ function parseRelationRef(stmt, from, graph, cteColumns) {
       };
     }
     for (const sName of Object.keys(graph.schemas)) {
-      const r = getRelation(graph, sName, firstName);
+      const r = getRelation(graph, sName, firstName, false, t.type === "quoted-identifier");
       if (r) {
         return {
           key: `${sName}.${bareKey}`,
@@ -1954,9 +1958,9 @@ function resolveRelationByName(tokens, at, graph) {
   const dotTok = tokens[at + 1];
   const relTok = tokens[at + 2];
   if (dotTok && dotTok.text === "." && relTok) {
-    return getRelation(graph, t.value ?? t.text, relTok.value ?? relTok.text);
+    return getRelation(graph, t.value ?? t.text, relTok.value ?? relTok.text, t.type === "quoted-identifier", relTok.type === "quoted-identifier");
   }
-  return getRelation(graph, "public", t.value ?? t.text) ?? findRelationAnySchema(graph, t.value ?? t.text);
+  return getRelation(graph, "public", t.value ?? t.text, false, t.type === "quoted-identifier") ?? findRelationAnySchema(graph, t.value ?? t.text);
 }
 function findRelationAnySchema(graph, name) {
   const lower = name.toLowerCase();
@@ -2453,7 +2457,7 @@ function addJsonbPathCandidates(out, ctx, graph) {
     }
   }
   if (!relNode) return;
-  const col = relNode.columns.find((c) => c.key === column.toLowerCase());
+  const col = relNode.columns.find((c) => c.key.toLowerCase() === column.toLowerCase());
   if (!col || !col.jsonbPaths) return;
   const { operator } = ctx.jsonb;
   const wantJson = operator === "->" || operator === "#>";
@@ -3187,7 +3191,7 @@ server.handle("resolve-hover", async (req) => {
 });
 server.handle("jsonb-tree", async (req) => {
   if (!activeGraph) return { paths: [] };
-  const [schema, table] = req.relationKey.toLowerCase().split(".");
+  const [schema] = req.relationKey.toLowerCase().split(".");
   const rel = activeGraph.schemas[schema ?? ""]?.relations[req.relationKey.toLowerCase()] ?? null;
   if (!rel) return { paths: [] };
   const col = rel.columns.find((c) => c.key === req.column.toLowerCase());

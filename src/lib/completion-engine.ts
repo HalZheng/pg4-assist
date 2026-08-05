@@ -275,7 +275,7 @@ function addJsonbPathCandidates(out: ScoredCandidate[], ctx: CompletionContext, 
     }
   }
   if (!relNode) return;
-  const col = relNode.columns.find((c) => c.key === column.toLowerCase());
+  const col = relNode.columns.find((c) => c.key.toLowerCase() === column.toLowerCase());
   if (!col || !col.jsonbPaths) return;
   const { operator } = ctx.jsonb;
   const wantJson = operator === "->" || operator === "#>";

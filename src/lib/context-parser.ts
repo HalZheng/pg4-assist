@@ -225,7 +225,7 @@ function parseRelationRef(
   const relTok = stmt[from + 2];
   if (dotTok && dotTok.text === "." && relTok && (relTok.type === "identifier" || relTok.type === "quoted-identifier")) {
     const relName = relTok.value ?? relTok.text;
-    const rel = graph ? getRelation(graph, firstName, relName) : null;
+    const rel = graph ? getRelation(graph, firstName, relName, t.type === "quoted-identifier", relTok.type === "quoted-identifier") : null;
     return {
       key: `${firstName.toLowerCase()}.${relName.toLowerCase()}`,
       schema: firstName,
@@ -247,7 +247,7 @@ function parseRelationRef(
   }
   if (graph) {
     // try public schema first
-    const rel = getRelation(graph, "public", firstName);
+    const rel = getRelation(graph, "public", firstName, false, t.type === "quoted-identifier");
     if (rel) {
       return {
         key: `public.${bareKey}`,
@@ -259,7 +259,7 @@ function parseRelationRef(
     }
     // search all schemas
     for (const sName of Object.keys(graph.schemas)) {
-      const r = getRelation(graph, sName, firstName);
+      const r = getRelation(graph, sName, firstName, false, t.type === "quoted-identifier");
       if (r) {
         return {
           key: `${sName}.${bareKey}`,
@@ -337,10 +337,10 @@ function resolveRelationByName(tokens: Token[], at: number, graph: SchemaGraph):
   const dotTok = tokens[at + 1];
   const relTok = tokens[at + 2];
   if (dotTok && dotTok.text === "." && relTok) {
-    return getRelation(graph, t.value ?? t.text, relTok.value ?? relTok.text);
+    return getRelation(graph, t.value ?? t.text, relTok.value ?? relTok.text, t.type === "quoted-identifier", relTok.type === "quoted-identifier");
   }
   // bare name -> public then any
-  return getRelation(graph, "public", t.value ?? t.text) ?? findRelationAnySchema(graph, t.value ?? t.text);
+  return getRelation(graph, "public", t.value ?? t.text, false, t.type === "quoted-identifier") ?? findRelationAnySchema(graph, t.value ?? t.text);
 }
 
 function findRelationAnySchema(graph: SchemaGraph, name: string) {
