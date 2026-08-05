@@ -49,9 +49,16 @@ export function getRelation(graph: SchemaGraph, schema: string, name: string, sc
 }
 
 export function getRelationByKey(graph: SchemaGraph, qualifiedKey: string) {
-  const parts = qualifiedKey.toLowerCase().split(".");
+  const parts = qualifiedKey.split(".");
   const schema = parts[0];
   const name = parts[1];
   if (!schema || !name) return null;
-  return graph.schemas[schema]?.relations[`${schema}.${name}`] ?? null;
+  // Try exact key first (covers double-quoted identifiers that preserve case),
+  // then fall back to lowercased key (covers unquoted identifiers). This keeps
+  // lookups correct regardless of whether the caller already folded the key.
+  return (
+    graph.schemas[schema]?.relations[`${schema}.${name}`] ??
+    graph.schemas[schema.toLowerCase()]?.relations[`${schema.toLowerCase()}.${name.toLowerCase()}`] ??
+    null
+  );
 }

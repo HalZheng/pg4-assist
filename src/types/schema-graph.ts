@@ -113,15 +113,6 @@ export function normalizeIdentifier(raw: string, quoted: boolean): { name: strin
   };
 }
 
-/** Postgres: unquoted identifiers fold to lowercase; quoted identifiers are exact. */
-export function identifierMatches(storedName: string, storedQuoted: boolean, query: string): boolean {
-  const q = query.toLowerCase();
-  if (storedQuoted) {
-    return storedName.toLowerCase() === q || storedName === query;
-  }
-  return storedName.toLowerCase() === q;
-}
-
 export function relationKey(schema: string, name: string, schemaQuoted = false, nameQuoted = false): string {
   return `${foldKey(schema, schemaQuoted)}.${foldKey(name, nameQuoted)}`;
 }

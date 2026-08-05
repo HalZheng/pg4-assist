@@ -1400,9 +1400,9 @@ function parseCreateIndex(stmt, start, ctx) {
     i++;
   }
   if (upperAt(stmt, i) === "ON") i++;
-  const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+  const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
   if (!relName) return;
-  const rel = lookupRelation(ctx.graph, schemaName, relName);
+  const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
   if (!rel) {
     ctx.warnings.push(warn(stmt, "index-target-missing", `CREATE INDEX on unknown table ${schemaName}.${relName}`));
     return;
@@ -1511,9 +1511,9 @@ function parseAlter(stmt, ctx) {
   if (obj === "TABLE") {
     let i = 2;
     if (upperAt(stmt, i) === "IF" && upperAt(stmt, i + 1) === "EXISTS") i += 2;
-    const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+    const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
     if (!relName) return;
-    const rel = lookupRelation(ctx.graph, schemaName, relName);
+    const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
     i = end;
     const action = upperAt(stmt, i);
     if (action === "ADD") {
@@ -1570,26 +1570,27 @@ function parseComment(stmt, ctx) {
   const obj = upperAt(stmt, 2);
   let i = 3;
   if (obj === "TABLE") {
-    const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+    const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
     if (!relName) return;
-    const rel = lookupRelation(ctx.graph, schemaName, relName);
+    const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
     if (rel) {
       const comment = readStringLiteral(stmt, end);
       if (comment != null) rel.comment = comment;
     }
   } else if (obj === "COLUMN") {
-    const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+    const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
     if (!relName) return;
     let j = end;
     let colName;
     const dotTok = stmt[j];
     const colTok = stmt[j + 1];
     if (dotTok && dotTok.text === "." && colTok) {
-      colName = (colTok.value ?? colTok.text).toLowerCase();
+      const colQuoted = colTok.type === "quoted-identifier";
+      colName = foldKey(colTok.value ?? colTok.text, colQuoted);
       j += 2;
     }
     if (!colName) return;
-    const rel = lookupRelation(ctx.graph, schemaName, relName);
+    const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
     if (rel) {
       const col = rel.columns.find((c) => c.key === colName);
       if (col) {
@@ -1641,9 +1642,9 @@ function ensureSchema(graph, name, quoted) {
   }
   return s;
 }
-function lookupRelation(graph, schemaName, relName) {
-  const sk = schemaName.toLowerCase();
-  const rk = `${sk}.${relName.toLowerCase()}`;
+function lookupRelation(graph, schemaName, relName, schemaQuoted = false, relQuoted = false) {
+  const sk = foldKey(schemaName, schemaQuoted);
+  const rk = `${sk}.${foldKey(relName, relQuoted)}`;
   return graph.schemas[sk]?.relations[rk] ?? null;
 }
 function splitTopLevelCommas(tokens) {

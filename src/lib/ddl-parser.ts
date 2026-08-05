@@ -76,6 +76,9 @@ export function parseDdl(
   }
 
   // 3. Attach JSONB trees to columns.
+  // Note: annotation keys are user-authored metadata in DDL comments and carry
+  // no quoting context, so they are matched against lowercased (unquoted) keys.
+  // JSONB annotations targeting double-quoted mixed-case tables are not supported.
   for (const [colKey, anns] of annotationsByColumn) {
     const [schema, table, column] = colKey.split(".");
     const rel = lookupRelation(ctx.graph, schema!, table!);
@@ -543,9 +546,9 @@ function parseCreateIndex(stmt: Token[], start: number, ctx: ParseContext): void
     i++;
   }
   if (upperAt(stmt, i) === "ON") i++;
-  const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+  const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
   if (!relName) return;
-  const rel = lookupRelation(ctx.graph, schemaName, relName);
+  const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
   if (!rel) {
     ctx.warnings.push(warn(stmt, "index-target-missing", `CREATE INDEX on unknown table ${schemaName}.${relName}`));
     return;
@@ -657,9 +660,9 @@ function parseAlter(stmt: Token[], ctx: ParseContext): void {
   if (obj === "TABLE") {
     let i = 2;
     if (upperAt(stmt, i) === "IF" && upperAt(stmt, i + 1) === "EXISTS") i += 2;
-    const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+    const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
     if (!relName) return;
-    const rel = lookupRelation(ctx.graph, schemaName, relName);
+    const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
     i = end;
     const action = upperAt(stmt, i);
     if (action === "ADD") {
@@ -724,16 +727,16 @@ function parseComment(stmt: Token[], ctx: ParseContext): void {
   const obj = upperAt(stmt, 2);
   let i = 3;
   if (obj === "TABLE") {
-    const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+    const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
     if (!relName) return;
-    const rel = lookupRelation(ctx.graph, schemaName, relName);
+    const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
     if (rel) {
       const comment = readStringLiteral(stmt, end);
       if (comment != null) rel.comment = comment;
     }
   } else if (obj === "COLUMN") {
     // schema.table.column  — but column could be schema.table (3-part). Read qualified then expect .col
-    const { schemaName, relName, end } = readQualifiedName(stmt, i, ctx);
+    const { schemaName, relName, schemaQuoted, relQuoted, end } = readQualifiedName(stmt, i, ctx);
     if (!relName) return;
     // expect . col
     let j = end;
@@ -741,11 +744,13 @@ function parseComment(stmt: Token[], ctx: ParseContext): void {
     const dotTok = stmt[j];
     const colTok = stmt[j + 1];
     if (dotTok && dotTok.text === "." && colTok) {
-      colName = (colTok.value ?? colTok.text).toLowerCase();
+      // Respect quoted-identifier folding for the column name (SPEC §5.2).
+      const colQuoted = colTok.type === "quoted-identifier";
+      colName = foldKey(colTok.value ?? colTok.text, colQuoted);
       j += 2;
     }
     if (!colName) return;
-    const rel = lookupRelation(ctx.graph, schemaName, relName);
+    const rel = lookupRelation(ctx.graph, schemaName, relName, schemaQuoted, relQuoted);
     if (rel) {
       const col = rel.columns.find((c) => c.key === colName);
       if (col) {
@@ -810,9 +815,19 @@ function ensureSchema(graph: SchemaGraph, name: string, quoted: boolean): Schema
   return s;
 }
 
-function lookupRelation(graph: SchemaGraph, schemaName: string, relName: string): TableNode | null {
-  const sk = schemaName.toLowerCase();
-  const rk = `${sk}.${relName.toLowerCase()}`;
+function lookupRelation(
+  graph: SchemaGraph,
+  schemaName: string,
+  relName: string,
+  schemaQuoted = false,
+  relQuoted = false
+): TableNode | null {
+  // Respect PostgreSQL identifier folding (SPEC §5.2): unquoted identifiers
+  // fold to lowercase, double-quoted identifiers keep their exact case.
+  // Mirrors `getRelation` in schema-index.ts so DDL-internal lookups (FK,
+  // ALTER TABLE, CREATE INDEX, COMMENT) stay consistent with storage keys.
+  const sk = foldKey(schemaName, schemaQuoted);
+  const rk = `${sk}.${foldKey(relName, relQuoted)}`;
   return graph.schemas[sk]?.relations[rk] ?? null;
 }
 
