@@ -383,6 +383,9 @@ function classifyCursor(
   map: RelationMap,
   graph: SchemaGraph | null
 ): { kind: CompletionContextKind; from: number; to: number; prefix: string } {
+  const compoundKeyword = compoundKeywordAtCursor(stmt.tokens, cursor, sql);
+  if (compoundKeyword) return compoundKeyword;
+
   // Find the token immediately before the cursor in the statement (significant only).
   const sig = significantTokensBefore(stmt.tokens, cursor);
   if (sig.length === 0) {
@@ -557,6 +560,32 @@ function significantTokensBefore(stmtTokens: Token[], cursor: number): Token[] {
   const sig = significantTokens(stmtTokens).filter((t) => t.start < cursor);
   // also include a token if cursor is right at its end
   return sig;
+}
+
+function compoundKeywordAtCursor(
+  tokens: Token[],
+  cursor: number,
+  sql: string
+): { kind: CompletionContextKind; from: number; to: number; prefix: string } | undefined {
+  for (let index = 0; index < tokens.length - 1; index++) {
+    const first = tokens[index]!;
+    const second = tokens[index + 1]!;
+    const firstUpper = first.text.toUpperCase();
+    if (
+      (firstUpper === "GROUP" || firstUpper === "ORDER") &&
+      second.text.toUpperCase() === "BY" &&
+      cursor >= first.start &&
+      cursor <= second.end
+    ) {
+      return {
+        kind: "keyword",
+        from: first.start,
+        to: second.end,
+        prefix: sql.slice(first.start, cursor),
+      };
+    }
+  }
+  return undefined;
 }
 
 function resolveRelationForPrefix(stmtTokens: Token[], colTok: Token, map: RelationMap): RelationRef | undefined {

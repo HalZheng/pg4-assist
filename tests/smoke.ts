@@ -406,6 +406,21 @@ test("'SELECT * FROM users ORDER ' → column context (ORDER is keyword, space a
   assert.equal(ctx.kind, "column", `got ${ctx.kind}`);
 });
 
+test("completing on BY replaces the entire GROUP BY or ORDER BY phrase", () => {
+  for (const { sql, keyword } of [
+    { sql: "SELECT * FROM users GROUP BY", keyword: "GROUP BY" },
+    { sql: "SELECT * FROM users ORDER BY", keyword: "ORDER BY" },
+  ]) {
+    const cursor = sql.lastIndexOf("BY") + 1;
+    const ctx = ctxAt(sql, cursor);
+    assert.equal(ctx.kind, "keyword", `${sql}: expected keyword context; got ${ctx.kind}`);
+    const item = buildCandidates(ctx, deps).items.find((candidate) => candidate.label === keyword);
+    assert.ok(item, `${sql}: ${keyword} should be suggested`);
+    const completed = `${sql.slice(0, ctx.from)}${item!.insertText}${sql.slice(ctx.to)}`;
+    assert.equal(completed, `${sql.slice(0, sql.lastIndexOf(keyword))}${item!.insertText}`);
+  }
+});
+
 test("retyping G before an existing ORDER BY suggests GROUP BY", () => {
   const sql = 'SELECT * FROM "public"."users" WHERE "id" = 1  G ORDER BY "id" DESC';
   const cursor = sql.indexOf(" G ORDER") + 2;
