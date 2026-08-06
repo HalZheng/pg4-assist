@@ -158,16 +158,22 @@ export class CompletionMenu {
     if (this.destroyed) return;
     // Only intercept keys when our menu is open AND the page focus is anywhere
     // (we let pgAdmin4 editor keep keystrokes except for nav keys).
+    const itemCount = this.items.length;
+    const canWrap = itemCount > 0;
     switch (ev.key) {
       case "ArrowDown":
         ev.preventDefault();
         ev.stopPropagation();
-        this.setSelected(this.selected + 1, false);
+        if (canWrap) {
+          this.setSelected((this.selected + 1) % itemCount, false);
+        }
         break;
       case "ArrowUp":
         ev.preventDefault();
         ev.stopPropagation();
-        this.setSelected(this.selected - 1, false);
+        if (canWrap) {
+          this.setSelected((this.selected - 1 + itemCount) % itemCount, false);
+        }
         break;
       case "PageDown":
         ev.preventDefault();
@@ -295,6 +301,8 @@ export class CompletionMenu {
         padding: 4px 0;
         max-height: 320px;
         overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
       }
       .pg4-completion-item {
         display: flex;
