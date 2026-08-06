@@ -209,8 +209,9 @@ export class CompletionMenu {
 
   private onOutsideClick(ev: MouseEvent) {
     if (this.destroyed) return;
-    const target = ev.target as Node | null;
-    if (target && this.container.contains(target)) return;
+    // Document listeners see Shadow DOM events retargeted to the overlay host,
+    // so target/contains alone would treat a menu item click as an outside click.
+    if (ev.composedPath().includes(this.container)) return;
     // Click was outside the menu — let pgAdmin4 keep the click but close ourselves.
     this.destroy("outside-click");
   }

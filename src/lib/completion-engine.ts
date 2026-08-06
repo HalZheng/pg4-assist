@@ -42,6 +42,9 @@ export function buildCandidates(ctx: CompletionContext, deps: CompletionEngineDe
       addSchemaCandidates(candidates, graph, ctx);
       addKeywordCandidates(candidates, ctx, ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "AS", "ON", "USING", "WHERE"]);
       break;
+    case "schema-relation":
+      addSchemaRelationCandidates(candidates, graph, ctx, deps);
+      break;
     case "schema":
       addSchemaCandidates(candidates, graph, ctx);
       break;
@@ -64,11 +67,7 @@ export function buildCandidates(ctx: CompletionContext, deps: CompletionEngineDe
       addColumnCandidates(candidates, ctx, true);
       break;
     case "keyword":
-      addKeywordCandidates(candidates, ctx, [
-        "SELECT", "FROM", "WHERE", "JOIN", "INSERT INTO", "UPDATE", "DELETE FROM", "WITH",
-        "UNION", "UNION ALL", "SELECT DISTINCT", "AND", "OR", "GROUP BY", "ORDER BY",
-        "HAVING", "LIMIT", "OFFSET", "RETURNING",
-      ]);
+      addKeywordCandidates(candidates, ctx, SQL_KEYWORDS.map((keyword) => keyword.label));
       break;
     case "cte-name":
       addKeywordCandidates(candidates, ctx, ["AS"]);
@@ -201,12 +200,35 @@ function addSchemaCandidates(out: ScoredCandidate[], graph: SchemaGraph | null, 
     if (!matchesPrefix(schema.name, ctx.prefix)) continue;
     out.push({
       kind: "keyword",
-      label: schema.name,
+      label: quoteIdentifier(schema.name),
       detail: "schema",
-      insertText: schema.name,
+      insertText: quoteIdentifier(schema.name),
       filterText: schema.name,
       score: 0,
       source: "schema",
+    });
+  }
+}
+
+function addSchemaRelationCandidates(out: ScoredCandidate[], graph: SchemaGraph | null, ctx: CompletionContext, deps: CompletionEngineDeps): void {
+  if (!graph || !ctx.activeSchema) return;
+  const schema = Object.values(graph.schemas).find((candidate) => candidate.name.toLowerCase() === ctx.activeSchema!.toLowerCase());
+  if (!schema) return;
+  const showSystem = deps.showSystemTables ?? false;
+  for (const relation of Object.values(schema.relations)) {
+    if (!showSystem && isNoiseRelation(relation.schema, relation.name)) continue;
+    if (!matchesPrefix(relation.name, ctx.prefix)) continue;
+    out.push({
+      kind: relation.kind === "view" ? "view" : "table",
+      label: quoteIdentifier(relation.name),
+      detail: `${relation.schema}.${relation.name} (${relation.kind})`,
+      documentation: relation.comment,
+      insertText: quoteIdentifier(relation.name),
+      filterText: relation.name,
+      score: 0,
+      source: "schema",
+      usageKey: relation.key,
+      baseType: relation.kind,
     });
   }
 }

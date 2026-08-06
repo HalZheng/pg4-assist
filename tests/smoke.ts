@@ -58,6 +58,7 @@ const graph: SchemaGraph = {
           makeColumn("id", "integer", { isPrimaryKey: true, ordinal: 1 }),
           makeColumn("name", "text", { ordinal: 2 }),
           makeColumn("email", "text", { ordinal: 3 }),
+          makeColumn("StudentID", "text", { ordinal: 4 }),
         ]),
         "public.orders": makeTable("public", "Orders", true, [
           // mixed-case name → must be quoted on insert
@@ -127,8 +128,8 @@ const deps = {
 
 // ---- helpers ---------------------------------------------------------------
 
-function ctxAt(sql: string, cursor = sql.length) {
-  return buildCompletionContext({ sql, cursor, graph });
+function ctxAt(sql: string, cursor = sql.length, graphInput = graph) {
+  return buildCompletionContext({ sql, cursor, graph: graphInput });
 }
 
 function labelsOf(items: { label: string }[]): string[] {
@@ -255,6 +256,17 @@ test("relation insertion quoting handles unquoted and already quoted qualified i
   assert.equal(quoteQualifiedIdentifier('"A"."table.with.dot"'), '"A"."table.with.dot"');
 });
 
+test("quoted schema prefixes complete only its quoted relation names", () => {
+  for (const sql of ['SELECT * FROM "BM".', 'SELECT * FROM "BM". B']) {
+    const ctx = ctxAt(sql, sql.length, duplicateRelationGraph);
+    assert.equal(ctx.kind, "schema-relation", `${sql}: expected schema-relation; got ${ctx.kind}`);
+    assert.equal(ctx.activeSchema, "BM");
+    const items = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph }).items;
+    assert.deepEqual(labelsOf(items), ['"BM_Account"']);
+    assert.equal(items[0]?.insertText, '"BM_Account"');
+  }
+});
+
 test("reserved word 'user' after FROM → relation context (not keyword)", () => {
   // 'user' is a PG reserved word but here it's a table-name prefix.
   const sql = "SELECT * FROM user";
@@ -339,6 +351,31 @@ test("'SELECT * FROM users u WHERE u.' → qualified-column context, columns of 
   assert.ok(labels.includes("email"), `email should be present; got ${labels.slice(0, 10).join(", ")}`);
 });
 
+test("'a.s' resolves the alias and filters its qualified columns", () => {
+  const sql = "SELECT * FROM users a WHERE a.s";
+  const ctx = ctxAt(sql);
+  assert.equal(ctx.kind, "qualified-column", `kind should be qualified-column; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "s");
+  assert.equal(ctx.activeRelation?.name, "users", "alias a should resolve to users");
+  const items = buildCandidates(ctx, deps).items;
+  assert.ok(labelsOf(items).includes("StudentID"), `StudentID should be suggested; got ${labelsOf(items).join(", ")}`);
+  assert.equal(insertTextOf(items, "StudentID"), '"StudentID"');
+});
+
+test("quoted alias column prefixes tolerate an unfinished or closed English quote", () => {
+  for (const sql of [
+    'SELECT * FROM users a WHERE a."Stu',
+    'SELECT * FROM users a WHERE a."Stu"',
+  ]) {
+    const ctx = ctxAt(sql);
+    assert.equal(ctx.kind, "qualified-column", `${sql}: expected qualified-column; got ${ctx.kind}`);
+    assert.equal(ctx.prefix, "Stu", `${sql}: quoted prefix should exclude quote characters`);
+    const items = buildCandidates(ctx, deps).items;
+    assert.ok(labelsOf(items).includes("StudentID"), `${sql}: StudentID should be suggested; got ${labelsOf(items).join(", ")}`);
+    assert.equal(insertTextOf(items, "StudentID"), '"StudentID"');
+  }
+});
+
 console.log("\n[10] JOIN clause still parses both relations (regression check)");
 test("'SELECT * FROM users u JOIN Orders o ON u.id = o.user_id WHERE ' → 2 visible relations", () => {
   const sql = "SELECT * FROM users u JOIN Orders o ON u.id = o.user_id WHERE n";
@@ -353,13 +390,13 @@ test("'SELECT * FROM users u JOIN Orders o ON u.id = o.user_id WHERE ' → 2 vis
 });
 
 console.log("\n[11] Statement keyword detection still works after a clause boundary");
-test("'SELECT * FROM users ' → relation done, next clause keyword expected", () => {
+test("'SELECT * FROM users whe' → keyword context suggests WHERE", () => {
   const sql = "SELECT * FROM users whe";
   const ctx = ctxAt(sql);
-  // 'whe' is not a keyword (not in KEYWORDS set) → identifier → column context
-  // (this is a prefix for 'where' but tokenizer sees it as identifier).
-  assert.equal(ctx.kind, "column", `got ${ctx.kind}`);
+  assert.equal(ctx.kind, "keyword", `got ${ctx.kind}`);
   assert.equal(ctx.prefix, "whe");
+  const labels = labelsOf(buildCandidates(ctx, deps).items);
+  assert.ok(labels.includes("WHERE"), `WHERE should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 test("'SELECT * FROM users ORDER ' → column context (ORDER is keyword, space after)", () => {
@@ -378,6 +415,24 @@ test("retyping G before an existing ORDER BY suggests GROUP BY", () => {
   const { items } = buildCandidates(ctx, deps);
   const labels = labelsOf(items);
   assert.ok(labels.includes("GROUP BY"), `GROUP BY should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+});
+
+test("completed SQL clauses provide their next keyword", () => {
+  const cases = [
+    { sql: "SELECT id f", keyword: "FROM" },
+    { sql: "SELECT * FROM users j", keyword: "JOIN" },
+    { sql: "SELECT * FROM users JOIN Orders o", keyword: "ON" },
+    { sql: "SELECT * FROM users WHERE id = 1 g", keyword: "GROUP BY" },
+    { sql: "SELECT * FROM users GROUP BY id h", keyword: "HAVING" },
+    { sql: "SELECT * FROM users ORDER BY id l", keyword: "LIMIT" },
+  ];
+
+  for (const { sql, keyword } of cases) {
+    const ctx = ctxAt(sql);
+    assert.equal(ctx.kind, "keyword", `${sql}: expected keyword context; got ${ctx.kind}`);
+    const labels = labelsOf(buildCandidates(ctx, deps).items);
+    assert.ok(labels.includes(keyword), `${sql}: ${keyword} should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  }
 });
 
 test("completed GROUP BY item followed by 'h' suggests HAVING, not columns", () => {

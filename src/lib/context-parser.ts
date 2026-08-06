@@ -41,6 +41,7 @@ export function buildCompletionContext(input: ParsedContextInput): CompletionCon
     prefix,
     activeAlias: relationMap.activeAlias,
     activeRelation: relationMap.activeRelation,
+    activeSchema: relationMap.activeSchema,
     visibleRelations: relationMap.visibleRelations,
     expectedTypes: relationMap.expectedTypes,
     jsonb: relationMap.jsonb,
@@ -108,6 +109,7 @@ interface RelationMap {
   visibleRelations: RelationRef[];
   activeAlias?: string;
   activeRelation?: RelationRef;
+  activeSchema?: string;
   expectedTypes?: string[];
   jsonb?: CompletionContext["jsonb"];
 }
@@ -451,15 +453,16 @@ function classifyCursor(
         map.activeRelation = aliasRel;
         return { kind: "qualified-column", from: cursor, to: cursor, prefix: "" };
       }
+      const schema = resolveSchemaName(graph, qualifier);
+      if (schema) {
+        map.activeSchema = schema;
+        return { kind: "schema-relation", from: cursor, to: cursor, prefix: "" };
+      }
       // is qualifier a relation name (schema.table. pattern handled below)?
       const relByName = map.visibleRelations.find((r) => r.name.toLowerCase() === qualifier.toLowerCase());
       if (relByName) {
         map.activeRelation = relByName;
         return { kind: "qualified-column", from: cursor, to: cursor, prefix: "" };
-      }
-      // is qualifier a schema name?
-      if (graph && lookupSchemas(graph, qualifier).length > 0) {
-        return { kind: "schema", from: cursor, to: cursor, prefix: "" };
       }
     }
     return { kind: "qualified-column", from: cursor, to: cursor, prefix: "" };
@@ -493,16 +496,37 @@ function classifyCursor(
     // The replacement range covers the identifier being typed.
     const from = prev.start;
     const to = cursor;
-    const prefix = sql.slice(from, cursor);
+    const prefix = completionPrefix(sql, from, cursor, prev);
     if (isExpressionValueToken(prevPrev)) {
       return { kind: "keyword", from, to, prefix };
     }
-    if (isGroupByContinuation(sig)) {
+    if (
+      isGroupOrOrderByContinuation(sig) ||
+      isAfterCompletedRelation(sig, map) ||
+      isSelectProjectionContinuation(sig)
+    ) {
       return { kind: "keyword", from, to, prefix };
     }
     // beforeUpper was already computed above (prevPrev's uppercased text).
     if (beforeUpper === ".") {
-      // qualified — handled above; fallback
+      const qualifierTok = sig[sig.length - 3];
+      if (qualifierTok) {
+        const qualifier = qualifierTok.value ?? qualifierTok.text;
+        const schema = resolveSchemaName(graph, qualifier);
+        if (schema) {
+          map.activeSchema = schema;
+          return { kind: "schema-relation", from, to, prefix };
+        }
+        const relation = map.visibleRelations.find(
+          (candidate) =>
+            candidate.alias?.toLowerCase() === qualifier.toLowerCase() ||
+            candidate.name.toLowerCase() === qualifier.toLowerCase()
+        );
+        if (relation) {
+          map.activeAlias = relation.alias;
+          map.activeRelation = relation;
+        }
+      }
       return { kind: "qualified-column", from, to, prefix };
     }
     if (isRelationContextKeyword(beforeUpper)) {
@@ -564,15 +588,39 @@ function isExpressionValueToken(token: Token | undefined): boolean {
   return token.type === "number" || token.type === "string" || token.text === ")";
 }
 
-function isGroupByContinuation(tokens: Token[]): boolean {
+function isGroupOrOrderByContinuation(tokens: Token[]): boolean {
   const currentPrefixIndex = tokens.length - 1;
   const previous = tokens[currentPrefixIndex - 1];
   if (!previous || previous.text === "," || previous.text.toUpperCase() === "BY") return false;
 
   for (let index = currentPrefixIndex - 1; index >= 0; index--) {
     const keyword = tokens[index]!.text.toUpperCase();
-    if (keyword === "GROUP" && tokens[index + 1]?.text.toUpperCase() === "BY") return true;
+    if (
+      (keyword === "GROUP" || keyword === "ORDER") &&
+      tokens[index + 1]?.text.toUpperCase() === "BY"
+    ) return true;
     if (isGroupBySuccessorKeyword(keyword)) return false;
+  }
+  return false;
+}
+
+function isAfterCompletedRelation(tokens: Token[], map: RelationMap): boolean {
+  const previous = tokens[tokens.length - 2];
+  if (!previous) return false;
+  const name = (previous.value ?? previous.text).toLowerCase();
+  return map.visibleRelations.some(
+    (relation) => relation.name.toLowerCase() === name || relation.alias?.toLowerCase() === name
+  );
+}
+
+function isSelectProjectionContinuation(tokens: Token[]): boolean {
+  const previous = tokens[tokens.length - 2];
+  if (!previous || previous.text === "," || previous.text.toUpperCase() === "AS") return false;
+
+  for (let index = tokens.length - 2; index >= 0; index--) {
+    const keyword = tokens[index]!.text.toUpperCase();
+    if (keyword === "SELECT") return true;
+    if (keyword === "FROM" || keyword === "WHERE" || keyword === "GROUP" || keyword === "ORDER") return false;
   }
   return false;
 }
@@ -587,6 +635,18 @@ function isGroupBySuccessorKeyword(keyword: string): boolean {
 
 function isRelationNameToken(t: Token): boolean {
   return t.type === "identifier" || t.type === "quoted-identifier";
+}
+
+function resolveSchemaName(graph: SchemaGraph | null, name: string): string | undefined {
+  return Object.values(graph?.schemas ?? {}).find(
+    (schema) => schema.name.toLowerCase() === name.toLowerCase()
+  )?.name;
+}
+
+function completionPrefix(sql: string, from: number, cursor: number, token: Token): string {
+  const prefix = sql.slice(from, cursor);
+  if (token.type !== "quoted-identifier") return prefix;
+  return prefix.replace(/^"/, "").replace(/"$/, "");
 }
 
 function unknownContext(from: number, to: number, prefix: string): CompletionContext {

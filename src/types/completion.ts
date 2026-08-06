@@ -2,6 +2,7 @@
 
 export type CompletionContextKind =
   | "relation"
+  | "schema-relation"
   | "schema"
   | "column"
   | "qualified-column"
@@ -45,6 +46,7 @@ export interface CompletionContext {
   prefix: string;
   activeAlias?: string;
   activeRelation?: RelationRef;
+  activeSchema?: string;
   visibleRelations: RelationRef[];
   expectedTypes?: string[];
   jsonb?: {

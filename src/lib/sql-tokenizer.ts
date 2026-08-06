@@ -133,7 +133,8 @@ export function tokenize(sql: string): Token[] {
         j++;
       }
       const text = sql.slice(i, j);
-      const value = text.slice(1, -1).replace(/""/g, '"');
+      const closed = text.endsWith('"');
+      const value = text.slice(1, closed ? -1 : undefined).replace(/""/g, '"');
       push({ type: "quoted-identifier", text, start: i, end: j, line, value });
       i = j;
       continue;
