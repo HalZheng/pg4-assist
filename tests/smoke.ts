@@ -369,6 +369,40 @@ test("'SELECT * FROM users ORDER ' → column context (ORDER is keyword, space a
   assert.equal(ctx.kind, "column", `got ${ctx.kind}`);
 });
 
+test("retyping G before an existing ORDER BY suggests GROUP BY", () => {
+  const sql = 'SELECT * FROM "public"."users" WHERE "id" = 1  G ORDER BY "id" DESC';
+  const cursor = sql.indexOf(" G ORDER") + 2;
+  const ctx = ctxAt(sql, cursor);
+  assert.equal(ctx.kind, "keyword", `expected keyword context; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "G");
+  const { items } = buildCandidates(ctx, deps);
+  const labels = labelsOf(items);
+  assert.ok(labels.includes("GROUP BY"), `GROUP BY should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+});
+
+test("completed GROUP BY item followed by 'h' suggests HAVING, not columns", () => {
+  const sql = 'SELECT * FROM "public"."users" GROUP BY "id","id" h';
+  const ctx = ctxAt(sql);
+  assert.equal(ctx.kind, "keyword", `expected keyword context; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "h");
+  const { items } = buildCandidates(ctx, deps);
+  const labels = labelsOf(items);
+  assert.ok(labels.includes("HAVING"), `HAVING should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(items.every((item) => item.kind === "keyword"), `columns should not be suggested after a completed GROUP BY expression; got ${items.map((item) => item.kind).join(", ")}`);
+});
+
+test("predicate value followed by 'o' suggests ORDER BY and OR, not columns", () => {
+  const sql = 'SELECT * FROM "public"."users" WHERE "id" = 1 o';
+  const ctx = ctxAt(sql);
+  assert.equal(ctx.kind, "keyword", `expected keyword context; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "o");
+  const { items } = buildCandidates(ctx, deps);
+  const labels = labelsOf(items);
+  assert.ok(labels.includes("OR"), `OR should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes("ORDER BY"), `ORDER BY should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(!labels.includes("id"), `columns should not be suggested after a completed predicate; got ${labels.slice(0, 10).join(", ")}`);
+});
+
 console.log("\n[12] Payload guards bound local parsing work");
 test("UTF-8 byte limits account for multibyte DDL content", () => {
   assert.equal(getUtf8ByteLength("A中"), 4);

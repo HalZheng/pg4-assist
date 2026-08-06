@@ -64,7 +64,11 @@ export function buildCandidates(ctx: CompletionContext, deps: CompletionEngineDe
       addColumnCandidates(candidates, ctx, true);
       break;
     case "keyword":
-      addKeywordCandidates(candidates, ctx, ["SELECT", "FROM", "WHERE", "JOIN", "INSERT INTO", "UPDATE", "DELETE FROM", "WITH", "UNION", "UNION ALL", "SELECT DISTINCT"]);
+      addKeywordCandidates(candidates, ctx, [
+        "SELECT", "FROM", "WHERE", "JOIN", "INSERT INTO", "UPDATE", "DELETE FROM", "WITH",
+        "UNION", "UNION ALL", "SELECT DISTINCT", "AND", "OR", "GROUP BY", "ORDER BY",
+        "HAVING", "LIMIT", "OFFSET", "RETURNING",
+      ]);
       break;
     case "cte-name":
       addKeywordCandidates(candidates, ctx, ["AS"]);

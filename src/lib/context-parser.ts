@@ -494,6 +494,12 @@ function classifyCursor(
     const from = prev.start;
     const to = cursor;
     const prefix = sql.slice(from, cursor);
+    if (isExpressionValueToken(prevPrev)) {
+      return { kind: "keyword", from, to, prefix };
+    }
+    if (isGroupByContinuation(sig)) {
+      return { kind: "keyword", from, to, prefix };
+    }
     // beforeUpper was already computed above (prevPrev's uppercased text).
     if (beforeUpper === ".") {
       // qualified — handled above; fallback
@@ -550,6 +556,32 @@ function isColumnContextKeyword(kw: string): boolean {
   return (
     kw === "SELECT" || kw === "WHERE" || kw === "ON" || kw === "GROUP" || kw === "ORDER" ||
     kw === "HAVING" || kw === "BY" || kw === "AND" || kw === "OR" || kw === "RETURNING" || kw === "SET"
+  );
+}
+
+function isExpressionValueToken(token: Token | undefined): boolean {
+  if (!token) return false;
+  return token.type === "number" || token.type === "string" || token.text === ")";
+}
+
+function isGroupByContinuation(tokens: Token[]): boolean {
+  const currentPrefixIndex = tokens.length - 1;
+  const previous = tokens[currentPrefixIndex - 1];
+  if (!previous || previous.text === "," || previous.text.toUpperCase() === "BY") return false;
+
+  for (let index = currentPrefixIndex - 1; index >= 0; index--) {
+    const keyword = tokens[index]!.text.toUpperCase();
+    if (keyword === "GROUP" && tokens[index + 1]?.text.toUpperCase() === "BY") return true;
+    if (isGroupBySuccessorKeyword(keyword)) return false;
+  }
+  return false;
+}
+
+function isGroupBySuccessorKeyword(keyword: string): boolean {
+  return (
+    keyword === "HAVING" || keyword === "ORDER" || keyword === "LIMIT" ||
+    keyword === "OFFSET" || keyword === "FETCH" || keyword === "UNION" ||
+    keyword === "INTERSECT" || keyword === "EXCEPT"
   );
 }
 
