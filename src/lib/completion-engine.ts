@@ -179,16 +179,23 @@ function addRelationCandidates(out: ScoredCandidate[], graph: SchemaGraph | null
     for (const rel of Object.values(schema.relations)) {
       // De-noise: hide system schemas / EF migration tables unless explicitly enabled.
       if (!showSystem && isNoiseRelation(rel.schema, rel.name)) continue;
-      const label = rel.schema === "public" ? rel.name : `${rel.schema}.${rel.name}`;
-      if (!matchesPrefix(label, ctx.prefix) && !matchesPrefix(rel.name, ctx.prefix)) continue;
+      const qualifiedName = `${schema.name}.${rel.name}`;
+      const qualifiedIdentifier = `${quoteIdentIfNeeded(schema.name, schema.quoted)}.${quoteIdentIfNeeded(rel.name, rel.quoted)}`;
+      if (
+        !matchesPrefix(qualifiedIdentifier, ctx.prefix) &&
+        !matchesPrefix(qualifiedName, ctx.prefix) &&
+        !matchesPrefix(rel.name, ctx.prefix)
+      ) {
+        continue;
+      }
       const kind: CompletionItem["kind"] = rel.kind === "table" ? "table" : rel.kind === "view" ? "view" : "table";
       out.push({
         kind,
-        label: rel.name,
+        label: qualifiedIdentifier,
         detail: `${rel.schema}.${rel.name} (${rel.kind})`,
         documentation: rel.comment,
-        insertText: quoteIdentIfNeeded(rel.name, rel.quoted),
-        filterText: rel.name,
+        insertText: qualifiedIdentifier,
+        filterText: qualifiedName,
         score: 0,
         source: "schema",
         usageKey: rel.key,

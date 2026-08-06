@@ -92,6 +92,28 @@ const graph: SchemaGraph = {
   functions: [],
 };
 
+const duplicateRelationGraph: SchemaGraph = {
+  ...graph,
+  schemas: {
+    BM: {
+      name: "BM",
+      key: "BM",
+      quoted: true,
+      relations: {
+        "BM.BM_Account": makeTable("BM", "BM_Account", true, [makeColumn("id", "integer")]),
+      },
+    },
+    BILL: {
+      name: "BILL",
+      key: "BILL",
+      quoted: true,
+      relations: {
+        "BILL.BM_Account": makeTable("BILL", "BM_Account", true, [makeColumn("id", "integer")]),
+      },
+    },
+  },
+};
+
 const deps = {
   graph,
   usage: [],
@@ -157,14 +179,14 @@ test("typing 'SELECT * from' (cursor at end of 'from') → keyword context", () 
   assert.ok(labels.includes("FROM"), `FROM keyword should be present; got ${labels.slice(0, 10).join(", ")}`);
 });
 
-console.log("\n[3] After 'FROM ' (with space) → relation context, tables suggested");
-test("'SELECT * FROM ' → relation context, users table present", () => {
+console.log("\n[3] After 'FROM ' (with space) → relation context, qualified tables suggested");
+test("'SELECT * FROM ' → relation context, public.users table present", () => {
   const sql = "SELECT * FROM ";
   const ctx = ctxAt(sql);
   assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
   const { items } = buildCandidates(ctx, deps);
   const labels = labelsOf(items);
-  assert.ok(labels.includes("users"), `users table should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes("public.users"), `public.users table should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 console.log("\n[4] Noise tables filtered by default (__EF*, pg_stat_*, pg_catalog.*)");
@@ -190,25 +212,40 @@ test("noise tables shown when showSystemTables=true", () => {
   );
 });
 
-console.log("\n[5] Mixed-case table name 'Orders' gets double-quoted insertText");
-test("Orders (quoted in DDL) → insertText is '\"Orders\"'", () => {
+console.log("\n[5] Relation candidates preserve schema qualification and identifier quoting");
+test("public.Orders (quoted in DDL) → insertText is 'public.\"Orders\"'", () => {
   const sql = "SELECT * FROM ord";
   const ctx = ctxAt(sql);
   assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
   const { items } = buildCandidates(ctx, deps);
-  const ordersItem = items.find((i) => i.label === "Orders");
-  assert.ok(ordersItem, `Orders should be a candidate; got ${labelsOf(items).slice(0, 10).join(", ")}`);
-  assert.equal(ordersItem!.insertText, '"Orders"', `insertText should be "\"Orders\""; got ${ordersItem!.insertText}`);
+  const ordersItem = items.find((i) => i.label === 'public."Orders"');
+  assert.ok(ordersItem, `public."Orders" should be a candidate; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  assert.equal(ordersItem!.insertText, 'public."Orders"', `insertText should be public."Orders"; got ${ordersItem!.insertText}`);
 });
 
-test("lowercase table 'users' (unquoted) → insertText is bare 'users'", () => {
+test("lowercase table users (unquoted) → insertText is public.users", () => {
   const sql = "SELECT * FROM use";
   const ctx = ctxAt(sql);
   assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
   const { items } = buildCandidates(ctx, deps);
-  const usersItem = items.find((i) => i.label === "users");
-  assert.ok(usersItem, "users should be a candidate");
-  assert.equal(usersItem!.insertText, "users", `insertText should be bare 'users'; got ${usersItem!.insertText}`);
+  const usersItem = items.find((i) => i.label === "public.users");
+  assert.ok(usersItem, "public.users should be a candidate");
+  assert.equal(usersItem!.insertText, "public.users", `insertText should be public.users; got ${usersItem!.insertText}`);
+});
+
+test("same table name in different schemas stays distinguishable and fully qualified", () => {
+  const sql = "SELECT * FROM BM_";
+  const ctx = buildCompletionContext({ sql, cursor: sql.length, graph: duplicateRelationGraph });
+  const { items } = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph });
+  const accountItems = items.filter((item) => item.insertText.endsWith('"BM_Account"'));
+  assert.deepEqual(
+    accountItems.map((item) => item.label).sort(),
+    ['"BILL"."BM_Account"', '"BM"."BM_Account"'],
+  );
+  assert.deepEqual(
+    accountItems.map((item) => item.insertText).sort(),
+    ['"BILL"."BM_Account"', '"BM"."BM_Account"'],
+  );
 });
 
 test("reserved word 'user' after FROM → relation context (not keyword)", () => {
@@ -219,7 +256,7 @@ test("reserved word 'user' after FROM → relation context (not keyword)", () =>
   assert.equal(ctx.prefix, "user");
   const { items } = buildCandidates(ctx, deps);
   const labels = labelsOf(items);
-  assert.ok(labels.includes("users"), `users table should be suggested for 'user' prefix; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes("public.users"), `public.users table should be suggested for 'user' prefix; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 console.log("\n[6] Typing 'where' (no space) → keyword context, not columns");
