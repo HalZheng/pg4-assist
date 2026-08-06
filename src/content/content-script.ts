@@ -108,7 +108,7 @@ class Pg4ContentScript {
       });
 
       // 3. Initialize parser worker (deferred — only created on first editor).
-      this.worker = this.createWorker();
+      this.worker = await this.createWorker();
 
       // 4. Load active snapshot for this origin from background.
       await this.reloadActiveSnapshot();
@@ -142,10 +142,22 @@ class Pg4ContentScript {
 
   // --- Worker setup ---------------------------------------------------------
 
-  private createWorker(): WorkerRpcClient | null {
+  private async createWorker(): Promise<WorkerRpcClient | null> {
     try {
       const url = chrome.runtime.getURL("parser-worker.js");
-      const w = new Worker(url, { type: "module" });
+      // MV3: content scripts can't construct a Worker from a chrome-extension:// URL
+      // (cross-origin Worker construction is blocked). If that throws, fetch the source
+      // and build a same-origin blob URL worker instead.
+      let w: Worker;
+      try {
+        w = new Worker(url, { type: "module" });
+      } catch {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`fetch parser-worker failed: ${res.status}`);
+        const text = await res.text();
+        const blob = new Blob([text], { type: "text/javascript" });
+        w = new Worker(URL.createObjectURL(blob), { type: "module" });
+      }
       const client = new WorkerRpcClient(w);
       // Set initial config.
       void client.call("set-config", { maxCandidates: this.settings.maxCandidates });
@@ -699,9 +711,19 @@ class Pg4ContentScript {
         usage: UsageStat[];
         snippets: Snippet[];
       } | null;
-      if (!resp) return;
+      if (!resp) {
+        console.info("[pg4] content: no active context returned for origin", this.activeOrigin);
+        return;
+      }
       this.activeSnapshotId = resp.snapshotId;
       this.activeGraph = resp.graph;
+      console.info("[pg4] content: active context loaded", {
+        origin: this.activeOrigin,
+        snapshotId: resp.snapshotId,
+        hasGraph: !!resp.graph,
+        schemas: resp.graph ? Object.keys(resp.graph.schemas).length : 0,
+        snippets: resp.snippets.length,
+      });
       if (this.worker) {
         await this.worker.call("set-active-graph", { graph: resp.graph });
         await this.worker.call("set-usage", { usage: resp.usage });

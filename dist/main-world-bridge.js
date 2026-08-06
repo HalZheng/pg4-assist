@@ -45,6 +45,68 @@
     if (v && typeof v.dispatch === "function" && v.state && v.state.doc) return v;
     const alt = anyEl?.view ?? anyEl?.editor;
     if (alt && typeof alt.dispatch === "function" && alt.state && alt.state.doc) return alt;
+    const Ctor = findEditorViewFromWebpack();
+    if (Ctor) {
+      try {
+        const found = Ctor.findFromDOM(el);
+        if (found && typeof found.dispatch === "function" && found.state && found.state.doc) return found;
+      } catch (e) {
+        console.warn("[pg4] bridge: findFromDOM failed:", e);
+      }
+    }
+    return null;
+  }
+  var webpackEditorView = void 0;
+  function findEditorViewFromWebpack() {
+    if (webpackEditorView !== void 0) return webpackEditorView;
+    webpackEditorView = null;
+    try {
+      const chunks = window.webpackChunk;
+      if (!Array.isArray(chunks) || chunks.length === 0) return null;
+      const allModules = {};
+      for (const c of chunks) {
+        if (!Array.isArray(c)) continue;
+        const mods = c[1];
+        if (mods && typeof mods === "object") {
+          for (const k of Object.keys(mods)) {
+            if (!(k in allModules)) allModules[k] = mods[k];
+          }
+        }
+      }
+      const cache = {};
+      const miniRequire = (id) => {
+        if (cache[id]) return cache[id].exports;
+        const factory = allModules[id];
+        if (!factory) throw new Error("no module " + id);
+        const module = { exports: {} };
+        cache[id] = module;
+        try {
+          factory(module, module.exports, miniRequire);
+        } catch (e) {
+          delete cache[id];
+          throw e;
+        }
+        return module.exports;
+      };
+      for (const id of Object.keys(allModules)) {
+        try {
+          const ex = miniRequire(id);
+          if (ex && typeof ex === "object") {
+            for (const k of Object.keys(ex)) {
+              const v = ex[k];
+              if (typeof v === "function" && typeof v.findFromDOM === "function") {
+                webpackEditorView = v;
+                console.info("[pg4] bridge: EditorView found via webpack (module", id + ", export", k + ")");
+                return webpackEditorView;
+              }
+            }
+          }
+        } catch {
+        }
+      }
+    } catch (e) {
+      console.warn("[pg4] bridge: webpack EditorView discovery failed:", e);
+    }
     return null;
   }
   var MainWorldBridge = class {
@@ -58,9 +120,12 @@
     // Detection: only run discovery on hosts that look like pgAdmin4. We can't read origin allowlist
     // here (isolated world concern); we just attempt discovery and let content script decide binding.
     pgAdminDetected = null;
+    // Set once a "no editor found" report has been shown, to avoid log spam from MutationObserver.
+    reportedNoEditor = false;
     start() {
       if (this.started) return;
       this.started = true;
+      console.info("[pg4] bridge: started (MAIN world)");
       window.addEventListener("message", this.onWindowMessage);
       window.addEventListener("pg4:extension-command", this.onExtensionCommand);
       this.scheduleDiscovery(0);
@@ -117,6 +182,16 @@
           this.detachEditor(id, "dom-removed");
         }
       }
+      if (this.editors.size === 0) {
+        if (!this.reportedNoEditor) {
+          console.info(
+            `[pg4] bridge: no CodeMirror 6 editor found (scanned ${candidates.length} element(s)); keeping watch`
+          );
+          this.reportedNoEditor = true;
+        }
+      } else {
+        this.reportedNoEditor = false;
+      }
     }
     tryAdopt(el) {
       if (this.domToEditorId.has(el)) return;
@@ -126,6 +201,8 @@
       if (!view.state?.doc || typeof view.dispatch !== "function" || typeof view.coordsAtPos !== "function") return;
       const editorId = `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       this.domToEditorId.set(el, editorId);
+      console.info("[pg4] bridge: editor adopted", editorId);
+      this.reportedNoEditor = false;
       const tracked = {
         editorId,
         view,

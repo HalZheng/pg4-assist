@@ -1088,7 +1088,7 @@
             if (s.menu) this.refreshMenu(s);
           }
         });
-        this.worker = this.createWorker();
+        this.worker = await this.createWorker();
         await this.reloadActiveSnapshot();
         this.handNonceToBridge();
         window.addEventListener("message", this.onBridgeMessage);
@@ -1103,10 +1103,19 @@
       }
     }
     // --- Worker setup ---------------------------------------------------------
-    createWorker() {
+    async createWorker() {
       try {
         const url = chrome.runtime.getURL("parser-worker.js");
-        const w = new Worker(url, { type: "module" });
+        let w;
+        try {
+          w = new Worker(url, { type: "module" });
+        } catch {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`fetch parser-worker failed: ${res.status}`);
+          const text = await res.text();
+          const blob = new Blob([text], { type: "text/javascript" });
+          w = new Worker(URL.createObjectURL(blob), { type: "module" });
+        }
         const client = new WorkerRpcClient(w);
         void client.call("set-config", { maxCandidates: this.settings.maxCandidates });
         return client;
@@ -1561,9 +1570,19 @@
           type: "pg4:get-active-context",
           origin: this.activeOrigin
         });
-        if (!resp) return;
+        if (!resp) {
+          console.info("[pg4] content: no active context returned for origin", this.activeOrigin);
+          return;
+        }
         this.activeSnapshotId = resp.snapshotId;
         this.activeGraph = resp.graph;
+        console.info("[pg4] content: active context loaded", {
+          origin: this.activeOrigin,
+          snapshotId: resp.snapshotId,
+          hasGraph: !!resp.graph,
+          schemas: resp.graph ? Object.keys(resp.graph.schemas).length : 0,
+          snippets: resp.snippets.length
+        });
         if (this.worker) {
           await this.worker.call("set-active-graph", { graph: resp.graph });
           await this.worker.call("set-usage", { usage: resp.usage });

@@ -98,6 +98,88 @@ function findViewOnElement(el: Element): CMEditorView | null {
   // Some integrations store it at `.view` or `.editor`.
   const alt = anyEl?.view ?? anyEl?.editor;
   if (alt && typeof alt.dispatch === "function" && alt.state && alt.state.doc) return alt as CMEditorView;
+  // pgAdmin's bundle mangles the cmView property, so it is not visible on the element.
+  // Fall back to the official EditorView.findFromDOM() via a class discovered from webpack.
+  const Ctor = findEditorViewFromWebpack();
+  if (Ctor) {
+    try {
+      const found = Ctor.findFromDOM(el);
+      if (found && typeof found.dispatch === "function" && found.state && found.state.doc) return found as CMEditorView;
+    } catch (e) {
+      console.warn("[pg4] bridge: findFromDOM failed:", e);
+    }
+  }
+  return null;
+}
+
+// --- Webpack module discovery (for mangled/bundled CM6) -----------------------
+// Some pgAdmin deployments bundle CodeMirror 6 with property mangling, hiding the
+// `cmView` reference that DOM-based discovery relies on. The official static
+// EditorView.findFromDOM() still works because it uses the same (mangled) property
+// internally — we just need the class reference, which lives in the webpack module
+// graph exposed via `window.webpackChunk`.
+interface CMEditorViewClass {
+  findFromDOM(node: Element): CMEditorView | null;
+}
+
+let webpackEditorView: CMEditorViewClass | null | undefined = undefined;
+
+function findEditorViewFromWebpack(): CMEditorViewClass | null {
+  if (webpackEditorView !== undefined) return webpackEditorView;
+  webpackEditorView = null;
+  try {
+    const chunks = (window as unknown as Record<string, any>).webpackChunk as any[] | undefined;
+    if (!Array.isArray(chunks) || chunks.length === 0) return null;
+    // Collect every module factory from all loaded chunks: {moduleId: factory}.
+    const allModules: Record<string, (module: any, exports: any, requireFn: any) => void> = {};
+    for (const c of chunks) {
+      if (!Array.isArray(c)) continue;
+      const mods = c[1];
+      if (mods && typeof mods === "object") {
+        for (const k of Object.keys(mods)) {
+          if (!(k in allModules)) allModules[k] = mods[k];
+        }
+      }
+    }
+    // Minimal require(): execute a factory on demand with its own cache.
+    const cache: Record<string, { exports: any }> = {};
+    const miniRequire = (id: string): any => {
+      if (cache[id]) return cache[id].exports;
+      const factory = allModules[id];
+      if (!factory) throw new Error("no module " + id);
+      const module = { exports: {} };
+      cache[id] = module;
+      try {
+        factory(module, module.exports, miniRequire);
+      } catch (e) {
+        delete cache[id];
+        throw e;
+      }
+      return module.exports;
+    };
+    // Scan module exports for the EditorView class (static findFromDOM).
+    // NOTE: some pgAdmin bundles drop the static `create` method, so we match on
+    // findFromDOM alone (its presence uniquely identifies the EditorView class).
+    for (const id of Object.keys(allModules)) {
+      try {
+        const ex = miniRequire(id);
+        if (ex && typeof ex === "object") {
+          for (const k of Object.keys(ex)) {
+            const v = ex[k];
+            if (typeof v === "function" && typeof v.findFromDOM === "function") {
+              webpackEditorView = v as CMEditorViewClass;
+              console.info("[pg4] bridge: EditorView found via webpack (module", id + ", export", k + ")");
+              return webpackEditorView;
+            }
+          }
+        }
+      } catch {
+        /* module failed to load in mini graph — try next */
+      }
+    }
+  } catch (e) {
+    console.warn("[pg4] bridge: webpack EditorView discovery failed:", e);
+  }
   return null;
 }
 
@@ -127,10 +209,13 @@ class MainWorldBridge {
   // Detection: only run discovery on hosts that look like pgAdmin4. We can't read origin allowlist
   // here (isolated world concern); we just attempt discovery and let content script decide binding.
   private pgAdminDetected: boolean | null = null;
+  // Set once a "no editor found" report has been shown, to avoid log spam from MutationObserver.
+  private reportedNoEditor = false;
 
   start() {
     if (this.started) return;
     this.started = true;
+    console.info("[pg4] bridge: started (MAIN world)");
     // Listen for messages from content script (extension-controlled, must carry nonce for writes).
     window.addEventListener("message", this.onWindowMessage);
     // CustomEvent fallback path (extension -> bridge) — supported for legacy paths.
@@ -211,6 +296,18 @@ class MainWorldBridge {
         this.detachEditor(id, "dom-removed");
       }
     }
+
+    // Report discovery state once per change so Console shows why nothing works on a given page.
+    if (this.editors.size === 0) {
+      if (!this.reportedNoEditor) {
+        console.info(
+          `[pg4] bridge: no CodeMirror 6 editor found (scanned ${candidates.length} element(s)); keeping watch`
+        );
+        this.reportedNoEditor = true;
+      }
+    } else {
+      this.reportedNoEditor = false;
+    }
   }
 
   private tryAdopt(el: HTMLElement): void {
@@ -224,6 +321,8 @@ class MainWorldBridge {
 
     const editorId = `cm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.domToEditorId.set(el, editorId);
+    console.info("[pg4] bridge: editor adopted", editorId);
+    this.reportedNoEditor = false;
 
     const tracked: TrackedEditor = {
       editorId,
