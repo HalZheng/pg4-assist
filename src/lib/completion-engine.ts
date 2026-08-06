@@ -6,6 +6,7 @@ import type { SchemaGraph, ColumnNode, JsonbPathNode } from "../types/schema-gra
 import type { UsageStat, Snippet } from "../types/editor";
 import { SQL_KEYWORDS, BUILTIN_FUNCTIONS, normalizeType } from "./sql-reference";
 import { computeScore, sortItems, type ScoredCandidate } from "./completion-ranker";
+import { quoteIdentifier } from "./sql-identifiers";
 
 export interface CompletionEngineDeps {
   graph: SchemaGraph | null;
@@ -138,24 +139,9 @@ function matchesPrefix(label: string, prefix: string): boolean {
   return false;
 }
 
-/** Reserved-word set used to decide whether an unquoted identifier needs quoting. */
-const RESERVED_WORDS = new Set(SQL_KEYWORDS.map((k) => k.label.toUpperCase()));
-
-/**
- * Wrap an identifier in double quotes when PostgreSQL would require it:
- *   - the DDL declared it quoted (mixed case preserved), or
- *   - the name contains uppercase letters / whitespace / special chars, or
- *   - the name is a reserved keyword (e.g. a table literally named "order").
- * Internal double quotes are escaped by doubling, per SQL syntax.
- */
-function quoteIdentIfNeeded(name: string, quoted: boolean): string {
-  if (quoted) return `"${name.replace(/"/g, '""')}"`;
-  const needsQuote =
-    /[A-Z]/.test(name) ||
-    /[^a-z0-9_]/.test(name) ||
-    /^[0-9]/.test(name) ||
-    RESERVED_WORDS.has(name.toUpperCase());
-  return needsQuote ? `"${name.replace(/"/g, '""')}"` : name;
+/** Quote relation identifiers consistently so completions preserve exact DDL names. */
+function quoteIdentIfNeeded(name: string, _quoted: boolean): string {
+  return quoteIdentifier(name);
 }
 
 /** System / noise schemas whose tables pollute FROM candidates by default. */
@@ -266,9 +252,11 @@ function addColumnsFromRelation(
   for (const c of rel.columns) {
     if (!matchesPrefix(c.name, prefix)) continue;
     // Qualify with alias only when the column is ambiguous across visible relations
-    // (multi-table) AND this relation has an alias. Bare column otherwise.
+    // (multi-table) AND this relation has an alias. Column identifiers are always
+    // quoted to preserve their exact PostgreSQL DDL spelling.
     const needsQualify = qualify && ambiguous?.has(c.key) && !!alias;
-    const insertText = needsQualify ? `${alias!}.${c.name}` : c.name;
+    const quotedColumn = quoteIdentifier(c.name);
+    const insertText = needsQualify ? `${alias!}.${quotedColumn}` : quotedColumn;
     out.push({
       kind: "column",
       label: c.name,

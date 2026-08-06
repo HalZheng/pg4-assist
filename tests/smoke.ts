@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { buildCompletionContext } from "../src/lib/context-parser";
 import { buildCandidates } from "../src/lib/completion-engine";
 import { assertSqlPayload, assertUtf8ByteLimit, getUtf8ByteLength } from "../src/lib/payload-limits";
+import { quoteQualifiedIdentifier } from "../src/lib/sql-identifiers";
 import type { SchemaGraph, TableNode, ColumnNode } from "../src/types/schema-graph";
 
 // ---- test schema fixture --------------------------------------------------
@@ -179,14 +180,14 @@ test("typing 'SELECT * from' (cursor at end of 'from') → keyword context", () 
   assert.ok(labels.includes("FROM"), `FROM keyword should be present; got ${labels.slice(0, 10).join(", ")}`);
 });
 
-console.log("\n[3] After 'FROM ' (with space) → relation context, qualified tables suggested");
-test("'SELECT * FROM ' → relation context, public.users table present", () => {
+console.log("\n[3] After 'FROM ' (with space) → relation context, quoted tables suggested");
+test("'SELECT * FROM ' → relation context, quoted public.users table present", () => {
   const sql = "SELECT * FROM ";
   const ctx = ctxAt(sql);
   assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
   const { items } = buildCandidates(ctx, deps);
   const labels = labelsOf(items);
-  assert.ok(labels.includes("public.users"), `public.users table should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes('"public"."users"'), `"public"."users" should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 console.log("\n[4] Noise tables filtered by default (__EF*, pg_stat_*, pg_catalog.*)");
@@ -213,24 +214,24 @@ test("noise tables shown when showSystemTables=true", () => {
 });
 
 console.log("\n[5] Relation candidates preserve schema qualification and identifier quoting");
-test("public.Orders (quoted in DDL) → insertText is 'public.\"Orders\"'", () => {
+test("public.Orders (quoted in DDL) → insertText is '\"public\".\"Orders\"'", () => {
   const sql = "SELECT * FROM ord";
   const ctx = ctxAt(sql);
   assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
   const { items } = buildCandidates(ctx, deps);
-  const ordersItem = items.find((i) => i.label === 'public."Orders"');
-  assert.ok(ordersItem, `public."Orders" should be a candidate; got ${labelsOf(items).slice(0, 10).join(", ")}`);
-  assert.equal(ordersItem!.insertText, 'public."Orders"', `insertText should be public."Orders"; got ${ordersItem!.insertText}`);
+  const ordersItem = items.find((i) => i.label === '"public"."Orders"');
+  assert.ok(ordersItem, `"public"."Orders" should be a candidate; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  assert.equal(ordersItem!.insertText, '"public"."Orders"', `insertText should be "public"."Orders"; got ${ordersItem!.insertText}`);
 });
 
-test("lowercase table users (unquoted) → insertText is public.users", () => {
+test("lowercase table users (unquoted) → insertText is \"public\".\"users\"", () => {
   const sql = "SELECT * FROM use";
   const ctx = ctxAt(sql);
   assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
   const { items } = buildCandidates(ctx, deps);
-  const usersItem = items.find((i) => i.label === "public.users");
-  assert.ok(usersItem, "public.users should be a candidate");
-  assert.equal(usersItem!.insertText, "public.users", `insertText should be public.users; got ${usersItem!.insertText}`);
+  const usersItem = items.find((i) => i.label === '"public"."users"');
+  assert.ok(usersItem, '"public"."users" should be a candidate');
+  assert.equal(usersItem!.insertText, '"public"."users"', `insertText should be "public"."users"; got ${usersItem!.insertText}`);
 });
 
 test("same table name in different schemas stays distinguishable and fully qualified", () => {
@@ -248,6 +249,12 @@ test("same table name in different schemas stays distinguishable and fully quali
   );
 });
 
+test("relation insertion quoting handles unquoted and already quoted qualified identifiers", () => {
+  assert.equal(quoteQualifiedIdentifier("BM.BM_Account"), '"BM"."BM_Account"');
+  assert.equal(quoteQualifiedIdentifier('"BM"."BM_Account"'), '"BM"."BM_Account"');
+  assert.equal(quoteQualifiedIdentifier('"A"."table.with.dot"'), '"A"."table.with.dot"');
+});
+
 test("reserved word 'user' after FROM → relation context (not keyword)", () => {
   // 'user' is a PG reserved word but here it's a table-name prefix.
   const sql = "SELECT * FROM user";
@@ -256,7 +263,7 @@ test("reserved word 'user' after FROM → relation context (not keyword)", () =>
   assert.equal(ctx.prefix, "user");
   const { items } = buildCandidates(ctx, deps);
   const labels = labelsOf(items);
-  assert.ok(labels.includes("public.users"), `public.users table should be suggested for 'user' prefix; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes('"public"."users"'), `"public"."users" should be suggested for 'user' prefix; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 console.log("\n[6] Typing 'where' (no space) → keyword context, not columns");
@@ -280,6 +287,19 @@ test("'SELECT * FROM users WHERE ' → column context, column 'id' present", () 
   const { items } = buildCandidates(ctx, deps);
   const labels = labelsOf(items);
   assert.ok(labels.includes("id"), `column 'id' should be present; got ${labels.slice(0, 10).join(", ")}`);
+  assert.equal(insertTextOf(items, "id"), '"id"');
+});
+
+test("'SELECT name FROM users GROUP BY ' → column context, full column list present", () => {
+  const sql = "SELECT name FROM users GROUP BY ";
+  const ctx = ctxAt(sql);
+  assert.equal(ctx.kind, "column", `kind should be 'column' (got ${ctx.kind})`);
+  assert.equal(ctx.prefix, "");
+  const { items } = buildCandidates(ctx, deps);
+  const labels = labelsOf(items);
+  assert.ok(labels.includes("id"), `column 'id' should be present; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes("name"), `column 'name' should be present; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes("email"), `column 'email' should be present; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 console.log("\n[8] Alias prefix on ambiguous columns (two tables both have 'id')");
@@ -292,18 +312,18 @@ test("'SELECT * FROM users u, orders o WHERE ' → ambiguous 'id' gets alias pre
   const idItem = items.find((i) => i.label === "id");
   assert.ok(idItem, `id column should be present; got ${labelsOf(items).slice(0, 10).join(", ")}`);
   assert.ok(
-    idItem!.insertText === "u.id" || idItem!.insertText === "o.id",
-    `ambiguous 'id' insertText should carry alias prefix (u.id or o.id); got ${idItem!.insertText}`
+    idItem!.insertText === 'u."id"' || idItem!.insertText === 'o."id"',
+    `ambiguous 'id' insertText should carry alias and quoted column (u."id" or o."id"); got ${idItem!.insertText}`
   );
 });
 
-test("unambiguous column 'email' (only in users) → bare insertText 'email'", () => {
+test("unambiguous column 'email' (only in users) → quoted insertText", () => {
   const sql = "SELECT * FROM users u, Orders o WHERE e";
   const ctx = ctxAt(sql);
   const { items } = buildCandidates(ctx, deps);
   const emailItem = items.find((i) => i.label === "email");
   assert.ok(emailItem, "email column should be present");
-  assert.equal(emailItem!.insertText, "email", `email should be bare (no alias); got ${emailItem!.insertText}`);
+  assert.equal(emailItem!.insertText, '"email"', `email should be quoted (no alias); got ${emailItem!.insertText}`);
 });
 
 console.log("\n[9] Qualified column context after 'alias.'");
@@ -325,11 +345,11 @@ test("'SELECT * FROM users u JOIN Orders o ON u.id = o.user_id WHERE ' → 2 vis
   const ctx = ctxAt(sql);
   assert.equal(ctx.visibleRelations.length, 2, `expected 2 visible relations; got ${ctx.visibleRelations.length}`);
   assert.equal(ctx.kind, "column");
-  // 'name' is unambiguous (only in users) → bare
+  // 'name' is unambiguous (only in users) → quoted without an alias
   const { items } = buildCandidates(ctx, deps);
   const nameItem = items.find((i) => i.label === "name");
   assert.ok(nameItem, "name column should be present");
-  assert.equal(nameItem!.insertText, "name", `name should be bare; got ${nameItem!.insertText}`);
+  assert.equal(nameItem!.insertText, '"name"', `name should be quoted; got ${nameItem!.insertText}`);
 });
 
 console.log("\n[11] Statement keyword detection still works after a clause boundary");

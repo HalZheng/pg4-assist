@@ -29,6 +29,8 @@ type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : nev
 type BridgeCommand = DistributiveOmit<ExtensionToBridgeMessage, "version" | "source" | "nonce" | "requestId">;
 import type { CompletionItem, EditorStateSnapshot } from "../types/completion";
 import type { SchemaGraph } from "../types/schema-graph";
+import { buildCompletionContext } from "../lib/context-parser";
+import { quoteQualifiedIdentifier } from "../lib/sql-identifiers";
 import type { Diagnostic, QueryHistoryEntry, Snippet, UsageStat } from "../types/editor";
 import { WorkerRpcClient } from "../runtime/worker-rpc";
 import { ensureOverlayHost, getShadow, onThemeChange } from "./overlay-host";
@@ -388,7 +390,9 @@ class Pg4ContentScript {
     // Check trigger conditions.
     if (!force) {
       const prefix = currentPrefix(sql, cursor);
-      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor)) {
+      const context = buildCompletionContext({ sql, cursor, graph: this.activeGraph });
+      const canShowEmptyColumnList = context.kind === "column" || context.kind === "qualified-column";
+      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor) && !canShowEmptyColumnList) {
         // Prefix collapsed (e.g. user typed a space or moved past the token). Close
         // any open menu so a subsequent Tab/Enter cannot commit at a stale
         // replaceRange — this is the root cause of "completion inserted at the
@@ -460,12 +464,15 @@ class Pg4ContentScript {
 
   private applyCompletion(session: EditorSession, item: CompletionItem, range: { from: number; to: number }) {
     // SPEC §6.6: replace [from, to) via CodeMirror transaction.
+    const insertText = item.kind === "table" || item.kind === "view"
+      ? quoteQualifiedIdentifier(item.insertText)
+      : item.insertText;
     this.sendToBridge({
       type: "apply-completion",
       editorId: session.editorId,
       from: range.from,
       to: range.to,
-      insert: item.insertText,
+      insert: insertText,
     });
     // Record usage locally (worker increments per-session counter).
     if (this.worker) {

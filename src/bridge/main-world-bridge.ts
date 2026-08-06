@@ -552,8 +552,10 @@ class MainWorldBridge {
     }
     try {
       // SPEC §4.2: MUST use CM6 transaction dispatch.
+      const cursor = msg.from + msg.insert.length;
       tracked.view.dispatch({
         changes: { from: msg.from, to: msg.to, insert: msg.insert },
+        selection: { anchor: cursor },
         // Mark as user input so CM6 history (undo/redo) records it.
         userEvent: "input",
       });
