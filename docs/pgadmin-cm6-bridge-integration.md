@@ -1,7 +1,8 @@
 # pgAdmin4 × CodeMirror 6 集成技术笔记
 
 > 记录对 pgAdmin4 网页版 Query Tool 结构的实测调查，以及「如何在该环境下发现并接管 CM6 编辑器」的可复用结论。
-> 结论基于 2026-08-06 在 `https://pgadmin-uat.dev.edutechonline.org/browser/`（pgAdmin 4，登录后）的浏览器实测。
+> 结论基于 2026-08-06 对两个 pgAdmin 4 站点（登录后）的浏览器实测：
+> `https://pgadmin-uat.dev.edutechonline.org/browser/` 与 `https://sfs-pg-dev.acscloud.net/browser/`。两站结构一致（见 §6 多环境实测对比）。
 > 阅读对象：后续维护本扩展或移植到其他 pgAdmin 环境的开发者 / AI agent。
 
 ---
@@ -74,3 +75,18 @@ div.cm-editor ͼ1 ͼ2 ͼ4 ͼ1g        ← 根元素，class 含 CM6 随机 style
 2. 打开 Query Tool 后，是否有 `.cm-editor` 元素？`Object.keys(el)` 是否为空（view 是否被隐藏）？
 3. `window.webpackChunk` 是否存在？mini-require 能否挖到带 `findFromDOM` 的类？
 4. 若 view 的静态方法名也被混淆（`findFromDOM` 不存在），需再调整匹配特征（如匹配有 `state`/`dispatch` 行为的类或用 `EditorView.findFromDOM` 的替代发现路径）。
+
+## 6. 多环境实测对比（2026-08-06）
+
+| 项目 | sfs-pg-dev.acscloud.net | pgadmin-uat.dev.edutechonline.org |
+|---|---|---|
+| Query Tool 位置 | iframe `/sqleditor/panel/*` | 相同 |
+| `.cm-editor` ownKeys | `[]`（无 `cmView`） | 相同 |
+| `webpackChunk` chunks | 6（14049 模块） | 6（14045 模块） |
+| `EditorView` 模块 id | `561506` | `561506` |
+| `EditorView.create` | 无 | 无 |
+| `EditorView.findFromDOM` | 有（实测可拿 view） | 有（实测可拿 view） |
+| `pgAdmin.Tools` | `FileManager` / `SQLEditor` | 相同 |
+| view 混淆类名 | `f` | `p`（仅压缩差异，无影响） |
+
+**结论**：两站为同一构建基线（模块 id 一致），CM6 集成方式相同，webpack 挖类 + `findFromDOM` 方案**通用**；模块数/混淆类名差异为构建小差异，不影响方案。
