@@ -203,6 +203,10 @@ export async function setHostBinding(origin: string, snapshotId: string | null):
   await tx(STORES.hostBindings, "readwrite", (s) => s.put(binding));
 }
 
+export async function deleteHostBinding(origin: string): Promise<void> {
+  await tx(STORES.hostBindings, "readwrite", (s) => s.delete(origin));
+}
+
 export async function getHostBinding(origin: string): Promise<HostBinding | null> {
   const row = (await tx(STORES.hostBindings, "readonly", (s) => s.get(origin))) as HostBinding | undefined;
   return row ?? null;

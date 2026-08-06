@@ -28,6 +28,7 @@ import {
   getSchemaGraphWithIndex,
   putSchemaGraph,
   setHostBinding,
+  deleteHostBinding,
   listHostBindings,
   recordUsage,
   getUsageForSnapshot,
@@ -218,6 +219,13 @@ async function handleMessage(msg: { type?: string }, sender: chrome.runtime.Mess
       await setHostBinding(origin, snapshotId);
       await setActiveSnapshotByOrigin(origin, snapshotId);
       // Notify all tabs with matching origin to reload.
+      await broadcastToOrigin(origin, { type: "pg4:snapshot-changed" });
+      return { ok: true };
+    }
+    case "pg4:delete-host-binding": {
+      const { origin } = msg as { origin: string };
+      await deleteHostBinding(origin);
+      await setActiveSnapshotByOrigin(origin, null);
       await broadcastToOrigin(origin, { type: "pg4:snapshot-changed" });
       return { ok: true };
     }

@@ -287,8 +287,8 @@ async function loadHosts() {
     const actions = el("td");
     const remove = el("button", "danger", "Remove");
     remove.addEventListener("click", async () => {
-      if (!confirm(`Remove host binding for ${h.origin}?`)) return;
-      await send({ type: "pg4:set-host-binding", origin: h.origin, snapshotId: null });
+      if (!confirm(`Remove authorized host ${h.origin}?`)) return;
+      await send({ type: "pg4:delete-host-binding", origin: h.origin });
       await loadHosts();
     });
     actions.appendChild(remove);
