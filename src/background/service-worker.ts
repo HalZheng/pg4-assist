@@ -46,6 +46,7 @@ import {
 } from "../storage/db";
 import { parseDdl, DDL_PARSER_VERSION } from "../lib/ddl-parser";
 import { buildIndex } from "../lib/schema-index";
+import { assertUtf8ByteLimit, MAX_DDL_IMPORT_BYTES } from "../lib/payload-limits";
 import type { SchemaGraph } from "../types/schema-graph";
 import type { QueryHistoryEntry, Snippet, UsageStat, SnapshotMeta, HostBinding } from "../types/editor";
 
@@ -139,6 +140,14 @@ async function handleMessage(msg: { type?: string }, sender: chrome.runtime.Mess
         sourceFileName: string;
         rawDdl: string;
       };
+      if (!displayName.trim() || !sourceFileName.trim() || typeof rawDdl !== "string") {
+        throw new Error("Snapshot name, source file name, and DDL content are required.");
+      }
+      assertUtf8ByteLimit(rawDdl, MAX_DDL_IMPORT_BYTES, "DDL import");
+      const existingDdlBytes = await getAllSnapshotRawSizes();
+      if (existingDdlBytes + new TextEncoder().encode(rawDdl).byteLength > 250 * 1024 * 1024) {
+        throw new Error("Import would exceed the 250 MB local DDL storage limit.");
+      }
       const snapshotId = `snap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const result = parseDdl(rawDdl, snapshotId, displayName, sourceFileName);
       const index = buildIndex(result.graph);

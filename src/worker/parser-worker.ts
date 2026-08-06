@@ -9,6 +9,7 @@ import { buildCandidates } from "../lib/completion-engine";
 import { diagnose } from "../lib/diagnostics";
 import { detectDanger } from "../lib/danger-detector";
 import { diffSnapshots } from "../lib/snapshot-diff";
+import { assertSqlPayload, assertUtf8ByteLimit, MAX_DDL_IMPORT_BYTES } from "../lib/payload-limits";
 import type { SchemaGraph } from "../types/schema-graph";
 import type { UsageStat, Snippet } from "../types/editor";
 import type { HoverDoc } from "../runtime/worker-rpc";
@@ -63,6 +64,7 @@ server.handle("record-usage", async (req) => {
 });
 
 server.handle("complete", async (req) => {
+  assertSqlPayload(req.sql, req.cursor);
   if (!activeGraph && usageStats.length === 0 && snippets.length === 0) {
     // no data — still return keywords via unknown context
   }
@@ -81,12 +83,14 @@ server.handle("complete", async (req) => {
 });
 
 server.handle("diagnose", async (req) => {
+  assertSqlPayload(req.sql, req.cursor);
   const largeDoc = req.sql.length > 500 * 1024;
   const diagnostics = diagnose({ sql: req.sql, cursor: req.cursor, graph: activeGraph, largeDoc });
   return { diagnostics };
 });
 
 server.handle("resolve-hover", async (req) => {
+  assertSqlPayload(req.sql, req.cursor);
   if (!activeGraph) return { documentation: null };
   // Resolve the symbol at/around cursor. Simplified: find the token under cursor.
   const doc = resolveHoverDoc(req.symbol, activeGraph);
@@ -104,6 +108,7 @@ server.handle("jsonb-tree", async (req) => {
 });
 
 server.handle("parse-ddl", async (req) => {
+  assertUtf8ByteLimit(req.raw, MAX_DDL_IMPORT_BYTES, "DDL parse");
   // run parse, emit progress
   server.emitProgress(req.id, { phase: "reading", processed: 0, total: req.raw.length });
   server.emitProgress(req.id, { phase: "tokenizing", processed: 0, total: 1 });
@@ -119,6 +124,7 @@ server.handle("diff-snapshots", async (req) => {
 });
 
 server.handle("detect-danger", async (req) => {
+  assertSqlPayload(req.sql);
   return detectDanger(req.sql);
 });
 

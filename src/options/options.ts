@@ -3,6 +3,7 @@
 
 import { DEFAULT_SETTINGS, type Pg4Settings } from "../storage/chrome-storage";
 import type { SnapshotMeta, HostBinding, Snippet, QueryHistoryEntry, DdlWarning } from "../types/editor";
+import { MAX_DDL_IMPORT_BYTES } from "../lib/payload-limits";
 
 // ---- Helpers --------------------------------------------------------------
 
@@ -158,6 +159,10 @@ function setupSnapshotImport() {
     const file = fileInput.files?.[0];
     if (!file) {
       toast("Choose a DDL file first.", "err");
+      return;
+    }
+    if (file.size > MAX_DDL_IMPORT_BYTES) {
+      toast("DDL files must be 50 MB or smaller.", "err");
       return;
     }
     const displayName = nameInput.value.trim() || file.name.replace(/\.(sql|txt|ddl)$/i, "");

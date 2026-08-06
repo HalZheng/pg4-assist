@@ -513,9 +513,10 @@ class MainWorldBridge {
     if (ev.source !== window) return;
     const data = ev.data;
     if (!isExtensionToBridgeMessage(data)) return;
-    // Verify nonce for write-type messages (all current ExtensionToBridgeMessage types are writes).
-    if (this.nonce && data.nonce !== this.nonce) {
-      this.notifyBridgeError("nonce-mismatch", "extension command nonce mismatch");
+    // Refuse every command until the extension establishes a nonce. This closes the
+    // bridge bootstrap window in which page code could otherwise issue a write.
+    if (!this.nonce || data.nonce !== this.nonce) {
+      this.notifyBridgeError("nonce-mismatch", "extension command nonce is missing or invalid");
       return;
     }
     const msg = data as ExtensionToBridgeMessage;

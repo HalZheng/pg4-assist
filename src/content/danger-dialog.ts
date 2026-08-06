@@ -20,6 +20,8 @@ export interface DangerDialogOptions {
   /** SQL that triggered the dialog (truncated for display). */
   sql: string;
   result: DangerResult;
+  /** Whether EXPLAIN can estimate this statement without executing it. */
+  canExplain: boolean;
   /** Called when user confirms; the caller is responsible for re-dispatching the original click. */
   onConfirm: (mode: "execute" | "explain") => void;
   /** Called when user cancels. */
@@ -95,15 +97,20 @@ export class DangerDialog {
       this.close("cancel", opts);
     });
 
-    const explain = document.createElement("button");
-    explain.className = "pg4-btn pg4-btn-explain";
-    explain.textContent = "EXPLAIN estimate";
-    explain.title = "Run EXPLAIN <statement> via pgAdmin4's existing query channel";
-    explain.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      this.close("explain", opts);
-    });
+    const explain = opts.canExplain
+      ? (() => {
+          const button = document.createElement("button");
+          button.className = "pg4-btn pg4-btn-explain";
+          button.textContent = "EXPLAIN estimate";
+          button.title = "Run EXPLAIN <statement> through pgAdmin4's existing query channel";
+          button.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            this.close("explain", opts);
+          });
+          return button;
+        })()
+      : null;
 
     const proceed = document.createElement("button");
     proceed.className = "pg4-btn pg4-btn-proceed";
@@ -115,12 +122,18 @@ export class DangerDialog {
     });
 
     actions.appendChild(cancel);
-    actions.appendChild(explain);
+    if (explain) actions.appendChild(explain);
     actions.appendChild(proceed);
 
     this.container.appendChild(title);
     if (reasons.childNodes.length) this.container.appendChild(reasons);
     if (targets) this.container.appendChild(targets);
+    if (!opts.canExplain) {
+      const unavailable = document.createElement("div");
+      unavailable.className = "pg4-danger-unavailable";
+      unavailable.textContent = "Estimate unavailable for this statement type.";
+      this.container.appendChild(unavailable);
+    }
     this.container.appendChild(sqlBox);
     this.container.appendChild(actions);
 
@@ -206,6 +219,11 @@ export class DangerDialog {
         font-size: 12px;
         color: var(--pg4-fg);
         margin-bottom: 8px;
+      }
+      .pg4-danger-unavailable {
+        font-size: 12px;
+        color: var(--pg4-muted);
+        margin: 0 0 8px;
       }
       .pg4-danger-sql {
         background: var(--pg4-error-bg);

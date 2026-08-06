@@ -48,12 +48,41 @@ export function isBridgeMessage(v: unknown): v is BridgeMessage {
 export function isExtensionToBridgeMessage(v: unknown): v is ExtensionToBridgeMessage {
   if (!v || typeof v !== "object") return false;
   const m = v as Record<string, unknown>;
-  return (
-    m.version === BRIDGE_PROTOCOL_VERSION &&
-    typeof m.requestId === "string" &&
-    m.source === CONTENT_SOURCE &&
-    typeof m.nonce === "string"
-  );
+  if (
+    m.version !== BRIDGE_PROTOCOL_VERSION ||
+    typeof m.requestId !== "string" ||
+    m.source !== CONTENT_SOURCE ||
+    !isNonce(m.nonce) ||
+    typeof m.editorId !== "string" ||
+    m.editorId.length === 0
+  ) {
+    return false;
+  }
+
+  switch (m.type) {
+    case "apply-completion":
+      return (
+        isSafeOffset(m.from) &&
+        isSafeOffset(m.to) &&
+        m.from <= m.to &&
+        typeof m.insert === "string" &&
+        m.insert.length <= MAX_PAGE_PAYLOAD_CHARS
+      );
+    case "request-state":
+    case "focus":
+    case "teardown":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isNonce(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{32}$/i.test(value);
+}
+
+function isSafeOffset(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** Generate a short request id without external deps. */

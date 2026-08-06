@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { buildCompletionContext } from "../src/lib/context-parser";
 import { buildCandidates } from "../src/lib/completion-engine";
+import { assertSqlPayload, assertUtf8ByteLimit, getUtf8ByteLength } from "../src/lib/payload-limits";
 import type { SchemaGraph, TableNode, ColumnNode } from "../src/types/schema-graph";
 
 // ---- test schema fixture --------------------------------------------------
@@ -309,6 +310,22 @@ test("'SELECT * FROM users ORDER ' → column context (ORDER is keyword, space a
   const ctx = ctxAt(sql);
   // after ORDER (column-context keyword) + space → column context
   assert.equal(ctx.kind, "column", `got ${ctx.kind}`);
+});
+
+console.log("\n[12] Payload guards bound local parsing work");
+test("UTF-8 byte limits account for multibyte DDL content", () => {
+  assert.equal(getUtf8ByteLength("A中"), 4);
+  assert.doesNotThrow(() => assertUtf8ByteLimit("A中", 4, "DDL import"));
+  assert.throws(() => assertUtf8ByteLimit("A中", 3, "DDL import"), /exceeds/);
+});
+
+test("SQL payload guard rejects oversized documents", () => {
+  assert.throws(() => assertSqlPayload("x".repeat(1_500_001)), /exceeds/);
+});
+
+test("SQL payload guard rejects cursors outside the document", () => {
+  assert.throws(() => assertSqlPayload("SELECT 1", 9), /cursor/);
+  assert.doesNotThrow(() => assertSqlPayload("SELECT 1", 8));
 });
 
 // ---- summary --------------------------------------------------------------
