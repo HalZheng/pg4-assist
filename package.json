@@ -1,0 +1,22 @@
+{
+  "name": "pg4-smart-assist",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PG4 Smart Assist — a parasitic enhancement layer for pgAdmin4 Query Tool (Chrome/Edge MV3).",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "npx esbuild tests/smoke.ts --bundle --platform=node --format=esm --outfile=dist-test/smoke.mjs && node dist-test/smoke.mjs",
+    "clean": "rm -rf dist dist-test"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.6.3"
+  },
+  "allowScripts": {
+    "esbuild@0.23.1": true
+  }
+}

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PG4 Smart Assist</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #57606a;
+      --border: #d0d7de;
+      --accent: #0969da;
+      --accent-fg: #ffffff;
+      --error: #cf222e;
+      --warn: #bf8700;
+      --row-hover: #f6f8fa;
+      --radius: 6px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --border: #30363d;
+        --accent: #58a6ff;
+        --accent-fg: #0d1117;
+        --error: #f85149;
+        --warn: #d29922;
+        --row-hover: #161b22;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--font);
+      font-size: 13px;
+      width: 320px;
+      min-height: 200px;
+    }
+    header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .logo {
+      width: 22px; height: 22px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 11px;
+    }
+    h1 { font-size: 13px; margin: 0; flex: 1; }
+    .status {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 10px;
+      background: var(--row-hover);
+      color: var(--muted);
+    }
+    .status.ok { background: #ddf4ff; color: var(--accent); }
+    .status.warn { background: rgba(191, 135, 0, 0.15); color: var(--warn); }
+    .status.err { background: rgba(207, 34, 46, 0.15); color: var(--error); }
+    body {
+      padding-bottom: 8px;
+    }
+    .body { padding: 10px 14px; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+    label { color: var(--muted); font-size: 12px; min-width: 80px; }
+    select, input[type="text"] {
+      flex: 1;
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 4px 6px;
+      font-size: 12.5px;
+    }
+    button {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 12.5px;
+    }
+    button.secondary {
+      background: var(--bg);
+      color: var(--fg);
+      border-color: var(--border);
+    }
+    button.danger {
+      background: var(--error);
+      color: #fff;
+      border-color: var(--error);
+    }
+    button.full { width: 100%; margin-top: 6px; }
+    .meta { font-size: 11px; color: var(--muted); margin: 4px 0; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+    .actions button { width: 100%; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+    .kv { display: flex; justify-content: space-between; font-size: 12px; margin: 2px 0; }
+    .kv span:first-child { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">PG4</div>
+    <h1>PG4 Smart Assist</h1>
+    <span id="status" class="status">…</span>
+  </header>
+  <div class="body">
+    <div id="origin-row" class="row" style="display:none">
+      <label>Host</label>
+      <span id="origin" style="font-family:var(--font);font-size:12px;flex:1"></span>
+    </div>
+    <div class="row">
+      <label>Active snapshot</label>
+      <select id="snapshot"><option value="">(none)</option></select>
+    </div>
+    <div id="snapshot-meta" class="meta"></div>
+
+    <div class="actions">
+      <button id="open-options" class="secondary">Options</button>
+      <button id="force-trigger" class="secondary">Trigger (Ctrl+Space)</button>
+    </div>
+
+    <hr />
+    <div class="kv"><span>Editors tracked</span><span id="editors">—</span></div>
+    <div class="kv"><span>Danger intercept</span><span id="danger-status">—</span></div>
+    <div class="kv"><span>Diagnostics</span><span id="diag-status">—</span></div>
+    <div class="kv"><span>Privacy</span><span>100% local, no upload</span></div>
+
+    <button id="open-history" class="secondary full" style="margin-top:8px">Open query history</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

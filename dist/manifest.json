@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "PG4 Smart Assist",
+  "version": "0.1.0",
+  "description": "Parasitic enhancement layer for pgAdmin4 Query Tool: offline schema-driven autocomplete, diagnostics, snippets, history and danger interception. No backend, fully local.",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": [
+    "http://localhost/*",
+    "https://localhost/*",
+    "http://127.0.0.1/*",
+    "https://127.0.0.1/*",
+    "https://sfs-pg-dev.acscloud.net/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "https://localhost/*",
+        "http://127.0.0.1/*",
+        "https://127.0.0.1/*",
+        "https://sfs-pg-dev.acscloud.net/*"
+      ],
+      "js": ["content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "http://localhost/*",
+        "https://localhost/*",
+        "http://127.0.0.1/*",
+        "https://127.0.0.1/*",
+        "https://sfs-pg-dev.acscloud.net/*"
+      ],
+      "js": ["main-world-bridge.js"],
+      "world": "MAIN",
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["main-world-bridge.js", "parser-worker.js", "VERSION.json"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "PG4 Smart Assist"
+  }
+}

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PG4 Smart Assist — Options</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #57606a;
+      --border: #d0d7de;
+      --accent: #0969da;
+      --accent-fg: #ffffff;
+      --error: #cf222e;
+      --warn: #bf8700;
+      --row-hover: #f6f8fa;
+      --row-selected: #ddf4ff;
+      --radius: 6px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", "JetBrains Mono", "Menlo", "Consolas", monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --border: #30363d;
+        --accent: #58a6ff;
+        --accent-fg: #0d1117;
+        --error: #f85149;
+        --warn: #d29922;
+        --row-hover: #161b22;
+        --row-selected: #1f6feb33;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header .logo {
+      width: 28px; height: 28px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 13px;
+    }
+    header h1 { font-size: 16px; margin: 0; }
+    header .sub { font-size: 12px; color: var(--muted); }
+    main {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      min-height: calc(100vh - 60px);
+    }
+    nav {
+      padding: 12px 0;
+      border-right: 1px solid var(--border);
+      background: var(--row-hover);
+    }
+    nav button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 8px 16px;
+      background: transparent;
+      border: none;
+      color: var(--fg);
+      cursor: pointer;
+      font-size: 13px;
+      border-left: 3px solid transparent;
+    }
+    nav button:hover { background: var(--row-hover); }
+    nav button.active {
+      background: var(--row-selected);
+      border-left-color: var(--accent);
+      font-weight: 600;
+    }
+    section {
+      padding: 20px 28px;
+      display: none;
+      max-width: 920px;
+    }
+    section.active { display: block; }
+    h2 { font-size: 16px; margin: 0 0 12px 0; }
+    h3 { font-size: 13px; margin: 16px 0 6px 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .row > label { min-width: 220px; }
+    input[type="text"], input[type="number"], select, textarea {
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 6px 8px;
+      font-size: 13px;
+      font-family: var(--font);
+    }
+    textarea { font-family: var(--mono); width: 100%; min-height: 80px; }
+    button {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button.secondary {
+      background: var(--bg);
+      color: var(--fg);
+      border-color: var(--border);
+    }
+    button.danger {
+      background: var(--error);
+      color: #fff;
+      border-color: var(--error);
+    }
+    button.ghost {
+      background: transparent;
+      color: var(--muted);
+      border-color: transparent;
+    }
+    button:hover { filter: brightness(1.05); }
+    button.ghost:hover { background: var(--row-hover); }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+    th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      background: var(--row-selected);
+      color: var(--accent);
+      margin-right: 6px;
+    }
+    .badge.warn { background: rgba(191, 135, 0, 0.15); color: var(--warn); }
+    .badge.err  { background: rgba(207, 34, 46, 0.15); color: var(--error); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    pre { background: var(--row-hover); padding: 8px 10px; border-radius: var(--radius); font-family: var(--mono); font-size: 12px; overflow: auto; }
+    .toast {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      background: var(--fg);
+      color: var(--bg);
+      padding: 8px 14px;
+      border-radius: var(--radius);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+      font-size: 12.5px;
+      z-index: 9999;
+    }
+    .toast.err { background: var(--error); color: #fff; }
+    .file-drop {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      text-align: center;
+      color: var(--muted);
+      cursor: pointer;
+      margin: 8px 0;
+    }
+    .file-drop:hover { background: var(--row-hover); }
+    .file-drop.has-file { border-color: var(--accent); color: var(--accent); }
+    details { margin: 8px 0; }
+    summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+    .warn-list { font-size: 12px; color: var(--warn); margin: 4px 0; max-height: 200px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; background: var(--row-hover); }
+    .warn-list .line { font-family: var(--mono); color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">PG4</div>
+    <div>
+      <h1>PG4 Smart Assist</h1>
+      <div class="sub">Offline schema-driven enhancement for pgAdmin4 Query Tool · v<span id="version">0.1.0</span></div>
+    </div>
+  </header>
+  <main>
+    <nav>
+      <button data-tab="snapshots" class="active">Snapshots</button>
+      <button data-tab="hosts">Authorized Hosts</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="snippets">Snippets</button>
+      <button data-tab="history">Query History</button>
+      <button data-tab="data">Privacy & Data</button>
+      <button data-tab="about">About</button>
+    </nav>
+
+    <!-- Snapshots -->
+    <section id="tab-snapshots" class="active">
+      <h2>Schema snapshots</h2>
+      <p class="hint">Each snapshot is parsed from a <code>pg_dump --schema-only</code> output and stored locally. Switching the active snapshot for a host re-binds all pgAdmin4 Query Tool tabs on that origin.</p>
+
+      <h3>Import new snapshot</h3>
+      <div class="row">
+        <label>Display name</label>
+        <input type="text" id="snap-name" placeholder="e.g. production-2026-Q3" style="width:260px" />
+      </div>
+      <div class="row">
+        <label>DDL file</label>
+        <input type="file" id="snap-file" accept=".sql,.txt,.ddl,text/plain" />
+      </div>
+      <div class="row">
+        <label></label>
+        <button id="snap-import">Import</button>
+        <span class="hint" id="snap-progress"></span>
+      </div>
+
+      <h3>Saved snapshots</h3>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Source file</th><th>Schemas</th><th>Relations</th><th>Functions</th><th>Warnings</th><th>Imported at</th><th>Size</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="snap-list">
+          <tr><td colspan="9" class="hint">No snapshots yet.</td></tr>
+        </tbody>
+      </table>
+
+      <details>
+        <summary>JSONB annotation format</summary>
+        <p class="hint">Annotate JSONB columns inside your DDL dump with line comments like:</p>
+        <pre>-- @pg4-jsonb public.orders.payload customer.name:string
+-- @pg4-jsonb public.orders.payload items[].sku:string
+-- @pg4-jsonb public.orders.payload items[].qty:integer "quantity per cart item"</pre>
+        <p class="hint">Paths use dotted notation; <code>[]</code> marks array segments. JSON Pointer (<code>/customer/name</code>) is also supported.</p>
+      </details>
+    </section>
+
+    <!-- Hosts -->
+    <section id="tab-hosts">
+      <h2>Authorized pgAdmin4 hosts</h2>
+      <p class="hint">PG4 only runs on origins you explicitly authorize. Localhost is allowed by default via the manifest.</p>
+      <div class="row">
+        <label>Add host origin</label>
+        <input type="text" id="host-input" placeholder="https://pgadmin.example.com" style="width:300px" />
+        <button id="host-add">Add &amp; request permission</button>
+      </div>
+      <table>
+        <thead><tr><th>Origin</th><th>Active snapshot</th><th>Updated</th><th>Actions</th></tr></thead>
+        <tbody id="host-list"><tr><td colspan="4" class="hint">No hosts configured.</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings">
+      <h2>Settings</h2>
+
+      <h3>Completion</h3>
+      <div class="row">
+        <label>Trigger mode</label>
+        <select id="set-completion-mode">
+          <option value="auto">Auto (show our menu when typing / native menu open)</option>
+          <option value="manual">Manual (Ctrl+Space only)</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Max candidates</label>
+        <input type="number" id="set-max-candidates" min="5" max="200" step="5" style="width:80px" />
+      </div>
+      <div class="row">
+        <label>Force-trigger shortcut</label>
+        <input type="text" id="set-shortcut" style="width:160px" />
+        <span class="hint">Format: Ctrl+Space, Cmd+Space, Alt+/</span>
+      </div>
+
+      <h3>Editor features</h3>
+      <div class="row">
+        <label>Smart paste wrapping</label>
+        <select id="set-paste-mode">
+          <option value="on">On (auto-wrap)</option>
+          <option value="notify">Notify only</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Live diagnostics</label>
+        <input type="checkbox" id="set-diagnostics" />
+      </div>
+      <div class="row">
+        <label>Danger intercept</label>
+        <input type="checkbox" id="set-danger" />
+      </div>
+      <div class="row">
+        <label>Show system tables<br><small>pg_catalog / information_schema / EF migration tables</small></label>
+        <input type="checkbox" id="set-system-tables" />
+      </div>
+
+      <h3>History</h3>
+      <div class="row">
+        <label>Retention (days)</label>
+        <input type="number" id="set-history-days" min="1" max="365" style="width:80px" />
+      </div>
+
+      <div class="row">
+        <label></label>
+        <button id="set-save">Save settings</button>
+        <button id="set-reset" class="secondary">Reset to defaults</button>
+      </div>
+    </section>
+
+    <!-- Snippets -->
+    <section id="tab-snippets">
+      <h2>Snippets</h2>
+      <p class="hint">Snippets are local SQL templates. Reference variables with <code>${name}</code>. They appear in completion prefixed with <code>snip:</code> and never auto-execute.</p>
+      <div class="row">
+        <label>ID (auto)</label>
+        <input type="text" id="snip-id" readonly style="width:200px" />
+        <button id="snip-new" class="secondary">New</button>
+      </div>
+      <div class="row">
+        <label>Title</label>
+        <input type="text" id="snip-title" style="width:300px" />
+      </div>
+      <div class="row">
+        <label>Category</label>
+        <input type="text" id="snip-category" style="width:200px" />
+      </div>
+      <div class="row">
+        <label>Description</label>
+        <input type="text" id="snip-description" style="width:400px" />
+      </div>
+      <div class="row">
+        <label>Body</label>
+      </div>
+      <textarea id="snip-body" rows="6" placeholder="SELECT * FROM ${table} WHERE ${column} = ${value};"></textarea>
+      <div class="row" style="margin-top:8px">
+        <label></label>
+        <button id="snip-save">Save</button>
+        <button id="snip-delete" class="danger">Delete</button>
+      </div>
+      <table>
+        <thead><tr><th>Title</th><th>Category</th><th>Used</th><th>Updated</th><th></th></tr></thead>
+        <tbody id="snip-list"><tr><td colspan="5" class="hint">No snippets yet.</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- History -->
+    <section id="tab-history">
+      <h2>Query history</h2>
+      <p class="hint">History is recorded only when a statement is executed in a pgAdmin4 Query Tool on an authorized origin. Nothing leaves your browser.</p>
+      <div class="row">
+        <label>Keyword</label>
+        <input type="text" id="hist-kw" style="width:200px" />
+        <label>Snapshot</label>
+        <select id="hist-snap" style="width:200px"><option value="">(any)</option></select>
+        <label>From</label>
+        <input type="date" id="hist-from" />
+        <label>To</label>
+        <input type="date" id="hist-to" />
+        <button id="hist-search">Search</button>
+        <button id="hist-clear" class="danger">Clear all</button>
+      </div>
+      <table>
+        <thead><tr><th>Time</th><th>Origin</th><th>Snapshot</th><th>SQL</th></tr></thead>
+        <tbody id="hist-list"><tr><td colspan="4" class="hint">No history yet.</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- Privacy & Data -->
+    <section id="tab-data">
+      <h2>Privacy &amp; local data</h2>
+      <p class="hint">All data (DDL, schema graphs, history, snippets, usage) lives in your browser's IndexedDB and <code>chrome.storage.local</code>. PG4 does not upload, transmit, or phone-home anything. No cookies, no tokens, no database credentials are read.</p>
+
+      <h3>Storage usage</h3>
+      <div id="data-stats" class="hint">Loading…</div>
+
+      <h3>Export</h3>
+      <div class="row">
+        <button id="data-export" class="secondary">Export all data (JSON)</button>
+      </div>
+
+      <h3>Danger zone</h3>
+      <div class="row">
+        <button id="data-wipe-history" class="danger">Wipe query history</button>
+        <button id="data-wipe-all" class="danger">Wipe ALL local PG4 data</button>
+      </div>
+    </section>
+
+    <!-- About -->
+    <section id="tab-about">
+      <h2>About</h2>
+      <p>PG4 Smart Assist is a parasitic enhancement layer for pgAdmin4 Query Tool.</p>
+      <ul>
+        <li>Manifest V3 extension; runs in Chrome / Edge.</li>
+        <li>Offline-first: all schema, history, snippets stay on your machine.</li>
+        <li>No backend, no telemetry, no cookies, no DB credentials.</li>
+        <li>Compatible with pgAdmin4 v8.4 through v9.x (CodeMirror 6).</li>
+      </ul>
+      <p class="hint">Version: <span id="about-version">0.1.0</span> · Parser v1</p>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+  <script src="options.js"></script>
+</body>
+</html>
