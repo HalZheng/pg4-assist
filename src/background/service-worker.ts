@@ -57,6 +57,8 @@ import type { QueryHistoryEntry, Snippet, UsageStat, SnapshotMeta, HostBinding }
 
 const settingsCache: { value: Pg4Settings | null } = { value: null };
 const graphCache = new Map<string, SchemaGraph>(); // snapshotId -> graph
+const DEFAULT_HOST_ORIGIN = "https://sfs-pg-dev.acscloud.net";
+const DEFAULT_HOSTS_SEEDED_KEY = "pg4.defaultHostsSeeded.v1";
 
 async function getSettingsCached(): Promise<Pg4Settings> {
   if (!settingsCache.value) settingsCache.value = await getSettings();
@@ -71,6 +73,17 @@ async function getGraphCached(snapshotId: string): Promise<SchemaGraph | null> {
     return g;
   }
   return null;
+}
+
+async function ensureDefaultHostBinding(): Promise<void> {
+  const seeded = await chrome.storage.local.get(DEFAULT_HOSTS_SEEDED_KEY);
+  if (seeded[DEFAULT_HOSTS_SEEDED_KEY] === true) return;
+
+  const bindings = await listHostBindings();
+  if (!bindings.some((binding) => binding.origin === DEFAULT_HOST_ORIGIN)) {
+    await setHostBinding(DEFAULT_HOST_ORIGIN, null);
+  }
+  await chrome.storage.local.set({ [DEFAULT_HOSTS_SEEDED_KEY]: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +222,7 @@ async function handleMessage(msg: { type?: string }, sender: chrome.runtime.Mess
       return { ok: true };
     }
     case "pg4:list-host-bindings": {
+      await ensureDefaultHostBinding();
       return await listHostBindings();
     }
     case "pg4:get-settings": {
@@ -335,6 +349,7 @@ async function broadcastToOrigin(origin: string, message: unknown): Promise<void
 chrome.runtime.onInstalled.addListener(async (details) => {
   // Initialize default settings on first install.
   await getSettingsCached();
+  await ensureDefaultHostBinding();
   if (details.reason === "install") {
     console.info("[pg4] installed; default settings initialized.");
   }
