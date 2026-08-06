@@ -339,6 +339,7 @@ async function loadSettings() {
   ($<HTMLInputElement>("set-diagnostics")).checked = s.diagnosticsEnabled;
   ($<HTMLInputElement>("set-danger")).checked = s.dangerInterceptEnabled;
   ($<HTMLInputElement>("set-history-days")).value = String(s.historyRetentionDays);
+  ($<HTMLInputElement>("set-system-tables")).checked = s.showSystemTables;
 }
 
 function setupSettingsSave() {
@@ -351,6 +352,7 @@ function setupSettingsSave() {
       diagnosticsEnabled: ($<HTMLInputElement>("set-diagnostics")).checked,
       dangerInterceptEnabled: ($<HTMLInputElement>("set-danger")).checked,
       historyRetentionDays: parseInt(($<HTMLInputElement>("set-history-days")).value, 10) || 90,
+      showSystemTables: ($<HTMLInputElement>("set-system-tables")).checked,
     };
     try {
       await send({ type: "pg4:set-settings", patch });

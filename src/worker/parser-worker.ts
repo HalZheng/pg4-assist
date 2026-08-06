@@ -23,6 +23,7 @@ let usageStats: UsageStat[] = [];
 let localUsage = new Map<string, number>();
 let snippets: Snippet[] = [];
 let maxCandidates = 50;
+let showSystemTables = false;
 
 server.handle("ping", async () => ({ pong: true as const, version: DDL_PARSER_VERSION.toString() }));
 
@@ -51,6 +52,7 @@ server.handle("set-snippets", async (req) => {
 
 server.handle("set-config", async (req) => {
   maxCandidates = req.maxCandidates;
+  if (typeof req.showSystemTables === "boolean") showSystemTables = req.showSystemTables;
   return { acknowledged: true as const };
 });
 
@@ -72,6 +74,7 @@ server.handle("complete", async (req) => {
     localUsage,
     snippets,
     maxCandidates,
+    showSystemTables,
   };
   const { items } = buildCandidates(context, deps);
   return { items, context };

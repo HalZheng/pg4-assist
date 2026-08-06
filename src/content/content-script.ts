@@ -160,7 +160,7 @@ class Pg4ContentScript {
       }
       const client = new WorkerRpcClient(w);
       // Set initial config.
-      void client.call("set-config", { maxCandidates: this.settings.maxCandidates });
+      void client.call("set-config", { maxCandidates: this.settings.maxCandidates, showSystemTables: this.settings.showSystemTables });
       return client;
     } catch (e) {
       console.warn("[pg4] worker creation failed:", e);
@@ -231,7 +231,11 @@ class Pg4ContentScript {
     }
     const editorDom = this.findEditorDomFor(editorId);
     const diagnostics = new DiagnosticsOverlay(editorDom);
-    const hover = new HoverCard();
+    // Reuse the shared hover card instance (created in init). Previously each
+    // session created its own HoverCard, but scheduleHover showed on the shared
+    // instance while hide() was called on the per-session instance — leaving the
+    // card stuck on screen. Pointing session.hover at the shared instance fixes it.
+    const hover = this.hoverCard ?? new HoverCard();
     const session: EditorSession = {
       editorId,
       state: { editorId, sql: "", cursor: 0, selection: { from: 0, to: 0 } },
@@ -289,6 +293,18 @@ class Pg4ContentScript {
 
     // Trigger completion (debounced).
     if (kind === "input" || kind === "paste") {
+      // Typing dismisses any open hover card immediately — the user is no longer
+      // "hovering" to read docs, so a lingering card would obstruct the editor.
+      if (kind === "input") this.hoverCard?.hide();
+      // Close the menu immediately when the just-typed character collapses the
+      // prefix (a space or other non-identifier char). This avoids the 30ms
+      // debounce window during which a fast Tab would commit at a stale range.
+      if (s.menu) {
+        const ch = sql[cursor - 1];
+        if (ch && !/[A-Za-z0-9_]/.test(ch) && !isImmediateTriggerContext(sql, cursor)) {
+          this.closeMenu(s, "external");
+        }
+      }
       this.scheduleCompletion(s, kind);
     } else if (kind === "selection") {
       // Selection change: don't auto-trigger; but if menu is open, keep its range in sync.
@@ -357,12 +373,20 @@ class Pg4ContentScript {
   private async requestCompletion(session: EditorSession, sql: string, cursor: number, force: boolean) {
     if (!this.worker) return;
     if (this.settings.completionTriggerMode === "manual" && !force) {
+      if (session.menu) this.closeMenu(session, "external");
       return;
     }
     // Check trigger conditions.
     if (!force) {
       const prefix = currentPrefix(sql, cursor);
-      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor)) return;
+      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor)) {
+        // Prefix collapsed (e.g. user typed a space or moved past the token). Close
+        // any open menu so a subsequent Tab/Enter cannot commit at a stale
+        // replaceRange — this is the root cause of "completion inserted at the
+        // original cursor position after pressing space".
+        if (session.menu) this.closeMenu(session, "external");
+        return;
+      }
     }
     const reqId = newRequestId();
     session.lastReqId = reqId;
@@ -685,7 +709,7 @@ class Pg4ContentScript {
       this.settings = DEFAULT_SETTINGS;
     }
     if (this.worker) {
-      void this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates });
+      void this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates, showSystemTables: this.settings.showSystemTables });
     }
   }
 
@@ -737,7 +761,7 @@ class Pg4ContentScript {
   private async syncWorkerState() {
     if (!this.worker) return;
     await this.worker.call("set-active-graph", { graph: this.activeGraph });
-    await this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates });
+    await this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates, showSystemTables: this.settings.showSystemTables });
   }
 
   // --- Forced completion shortcut ------------------------------------------

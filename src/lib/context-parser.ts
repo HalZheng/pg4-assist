@@ -173,12 +173,17 @@ function collectCtesAndRelations(stmt: Token[], graph: SchemaGraph | null, map: 
   for (let k = 0; k < stmt.length; k++) {
     const kw = upperAt(stmt, k);
     if (kw === "FROM" || kw === "JOIN" || kw === "UPDATE" || kw === "INTO") {
-      const isJoin = kw === "JOIN";
+      const beforeCount = map.visibleRelations.length;
       // skip join modifiers
       let m = k + 1;
       while (upperAt(stmt, m) === "INNER" || upperAt(stmt, m) === "LEFT" || upperAt(stmt, m) === "RIGHT" || upperAt(stmt, m) === "FULL" || upperAt(stmt, m) === "CROSS" || upperAt(stmt, m) === "OUTER" || upperAt(stmt, m) === "LATERAL") m++;
-      const rel = parseRelationRef(stmt, m, graph, cteColumns);
-      if (rel) {
+      // Parse the first relation (and any comma-separated relations in the same
+      // FROM clause, e.g. "FROM users u, orders o"). JOIN clauses are separate
+      // because they re-trigger the FROM/JOIN keyword scan.
+      let rel = parseRelationRef(stmt, m, graph, cteColumns);
+      let lastRelEndIndex = -1;
+      let lastAliasSkip = 0;
+      while (rel) {
         // find alias after relation (AS alias or bare alias)
         let next = rel.endIndex + 1;
         if (upperAt(stmt, next) === "AS") next++;
@@ -187,7 +192,21 @@ function collectCtesAndRelations(stmt: Token[], graph: SchemaGraph | null, map: 
           rel.alias = aliasTok.value ?? aliasTok.text;
         }
         map.visibleRelations.push(rel);
-        k = rel.endIndex + (rel.alias ? (stmt[rel.endIndex + 1]?.text === "AS" ? 2 : 1) : 0);
+        lastRelEndIndex = rel.endIndex;
+        lastAliasSkip = rel.alias ? (stmt[rel.endIndex + 1]?.text === "AS" ? 2 : 1) : 0;
+        // comma-separated continuation: token AFTER relation + alias
+        const afterRel = rel.endIndex + 1 + lastAliasSkip;
+        if (stmt[afterRel]?.text === ",") {
+          const rel2 = parseRelationRef(stmt, afterRel + 1, graph, cteColumns);
+          if (!rel2) break;
+          rel = rel2;
+          continue;
+        }
+        break;
+      }
+      // advance k so the outer loop's k++ lands past the relation + alias.
+      if (lastRelEndIndex >= 0) {
+        k = lastRelEndIndex + lastAliasSkip;
       }
     }
   }
@@ -372,6 +391,34 @@ function classifyCursor(
   const prevPrev = sig[sig.length - 2];
   const prevText = prev.text;
   const prevUpper = prevText.toUpperCase();
+  const beforeUpper = prevPrev ? prevPrev.text.toUpperCase() : "";
+
+  // Reserved words used as identifiers (e.g. a table named "user" or a column
+  // named "order") are tokenized as keywords. When such a keyword follows a
+  // relation/column-context keyword (FROM/JOIN/WHERE/...), the user is actually
+  // typing an identifier that coincides with a reserved word — NOT typing a
+  // statement keyword. Detect this so that "FROM user" suggests the "users"
+  // table instead of the USER keyword.
+  const prevIsReservedAsIdent =
+    prev.type === "keyword" &&
+    cursor > prev.start &&
+    cursor <= prev.end &&
+    (isRelationContextKeyword(beforeUpper) || isColumnContextKeyword(beforeUpper));
+
+  // User is typing a keyword (e.g. "select" / "from" / "where") and the cursor is
+  // still within or right at the end of the keyword token (no space separator yet).
+  // Treat the keyword itself as the prefix and offer statement keywords filtered
+  // by that prefix — this is how VSCode SQL plugins behave: typing "sel" suggests
+  // SELECT; only after a space does the context advance to columns/tables.
+  //
+  // Excluded: when the keyword follows a relation/column-context keyword
+  // (handled by prevIsReservedAsIdent above) — in that case it's an identifier.
+  if (prev.type === "keyword" && !prevIsReservedAsIdent && cursor > prev.start && cursor <= prev.end) {
+    const from = prev.start;
+    const to = cursor;
+    const prefix = sql.slice(from, cursor);
+    return { kind: "keyword", from, to, prefix };
+  }
 
   // JSONB path operator
   if (prevText === "->" || prevText === "->>" || prevText === "#>" || prevText === "#>>") {
@@ -440,14 +487,14 @@ function classifyCursor(
   }
 
   // Typing an identifier prefix: compute the prefix and replacement range.
-  if (prev.type === "identifier" || prev.type === "quoted-identifier") {
+  // Also covers a reserved word used as an identifier (prevIsReservedAsIdent):
+  // the token type is "keyword" but the user means it as a name.
+  if (prev.type === "identifier" || prev.type === "quoted-identifier" || prevIsReservedAsIdent) {
     // The replacement range covers the identifier being typed.
     const from = prev.start;
     const to = cursor;
     const prefix = sql.slice(from, cursor);
-    // determine kind by earlier significant token
-    const before = sig[sig.length - 2];
-    const beforeUpper = before ? before.text.toUpperCase() : "";
+    // beforeUpper was already computed above (prevPrev's uppercased text).
     if (beforeUpper === ".") {
       // qualified — handled above; fallback
       return { kind: "qualified-column", from, to, prefix };

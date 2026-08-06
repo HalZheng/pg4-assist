@@ -12,7 +12,7 @@ export type WorkerRequest =
   | { id: string; type: "set-active-graph"; graph: SchemaGraph | null }
   | { id: string; type: "set-usage"; usage: UsageStat[] }
   | { id: string; type: "set-snippets"; snippets: Snippet[] }
-  | { id: string; type: "set-config"; maxCandidates: number }
+  | { id: string; type: "set-config"; maxCandidates: number; showSystemTables?: boolean }
   | { id: string; type: "record-usage"; symbolKey: string }
   | { id: string; type: "complete"; sql: string; cursor: number; editorId: string }
   | { id: string; type: "diagnose"; sql: string; cursor: number }

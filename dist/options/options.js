@@ -9,6 +9,7 @@
     maxCandidates: 50,
     completionShortcut: "Ctrl+Space",
     historyRetentionDays: 90,
+    showSystemTables: false,
     smartPasteHintDismissed: false
   };
 
@@ -331,6 +332,7 @@ This also clears its host bindings, usage and history associations.`)) return;
     $("set-diagnostics").checked = s.diagnosticsEnabled;
     $("set-danger").checked = s.dangerInterceptEnabled;
     $("set-history-days").value = String(s.historyRetentionDays);
+    $("set-system-tables").checked = s.showSystemTables;
   }
   function setupSettingsSave() {
     $("set-save").addEventListener("click", async () => {
@@ -341,7 +343,8 @@ This also clears its host bindings, usage and history associations.`)) return;
         pasteMode: $("set-paste-mode").value,
         diagnosticsEnabled: $("set-diagnostics").checked,
         dangerInterceptEnabled: $("set-danger").checked,
-        historyRetentionDays: parseInt($("set-history-days").value, 10) || 90
+        historyRetentionDays: parseInt($("set-history-days").value, 10) || 90,
+        showSystemTables: $("set-system-tables").checked
       };
       try {
         await send({ type: "pg4:set-settings", patch });

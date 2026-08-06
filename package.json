@@ -8,7 +8,8 @@
     "build": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "test": "npx esbuild tests/smoke.ts --bundle --platform=node --format=esm --outfile=dist-test/smoke.mjs && node dist-test/smoke.mjs",
+    "clean": "rm -rf dist dist-test"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",

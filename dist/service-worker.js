@@ -16,6 +16,7 @@ var DEFAULT_SETTINGS = {
   maxCandidates: 50,
   completionShortcut: "Ctrl+Space",
   historyRetentionDays: 90,
+  showSystemTables: false,
   smartPasteHintDismissed: false
 };
 async function getSettings() {

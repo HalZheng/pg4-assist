@@ -1824,11 +1824,13 @@ function collectCtesAndRelations(stmt, graph, map) {
   for (let k = 0; k < stmt.length; k++) {
     const kw = upperAt2(stmt, k);
     if (kw === "FROM" || kw === "JOIN" || kw === "UPDATE" || kw === "INTO") {
-      const isJoin = kw === "JOIN";
+      const beforeCount = map.visibleRelations.length;
       let m = k + 1;
       while (upperAt2(stmt, m) === "INNER" || upperAt2(stmt, m) === "LEFT" || upperAt2(stmt, m) === "RIGHT" || upperAt2(stmt, m) === "FULL" || upperAt2(stmt, m) === "CROSS" || upperAt2(stmt, m) === "OUTER" || upperAt2(stmt, m) === "LATERAL") m++;
-      const rel = parseRelationRef(stmt, m, graph, cteColumns);
-      if (rel) {
+      let rel = parseRelationRef(stmt, m, graph, cteColumns);
+      let lastRelEndIndex = -1;
+      let lastAliasSkip = 0;
+      while (rel) {
         let next = rel.endIndex + 1;
         if (upperAt2(stmt, next) === "AS") next++;
         const aliasTok = stmt[next];
@@ -1836,7 +1838,19 @@ function collectCtesAndRelations(stmt, graph, map) {
           rel.alias = aliasTok.value ?? aliasTok.text;
         }
         map.visibleRelations.push(rel);
-        k = rel.endIndex + (rel.alias ? stmt[rel.endIndex + 1]?.text === "AS" ? 2 : 1 : 0);
+        lastRelEndIndex = rel.endIndex;
+        lastAliasSkip = rel.alias ? stmt[rel.endIndex + 1]?.text === "AS" ? 2 : 1 : 0;
+        const afterRel = rel.endIndex + 1 + lastAliasSkip;
+        if (stmt[afterRel]?.text === ",") {
+          const rel2 = parseRelationRef(stmt, afterRel + 1, graph, cteColumns);
+          if (!rel2) break;
+          rel = rel2;
+          continue;
+        }
+        break;
+      }
+      if (lastRelEndIndex >= 0) {
+        k = lastRelEndIndex + lastAliasSkip;
       }
     }
   }
@@ -1981,6 +1995,14 @@ function classifyCursor(stmt, cursor, sql, map, graph) {
   const prevPrev = sig[sig.length - 2];
   const prevText = prev.text;
   const prevUpper = prevText.toUpperCase();
+  const beforeUpper = prevPrev ? prevPrev.text.toUpperCase() : "";
+  const prevIsReservedAsIdent = prev.type === "keyword" && cursor > prev.start && cursor <= prev.end && (isRelationContextKeyword(beforeUpper) || isColumnContextKeyword(beforeUpper));
+  if (prev.type === "keyword" && !prevIsReservedAsIdent && cursor > prev.start && cursor <= prev.end) {
+    const from = prev.start;
+    const to = cursor;
+    const prefix = sql.slice(from, cursor);
+    return { kind: "keyword", from, to, prefix };
+  }
   if (prevText === "->" || prevText === "->>" || prevText === "#>" || prevText === "#>>") {
     const colTok = prevPrev;
     if (colTok) {
@@ -2033,12 +2055,10 @@ function classifyCursor(stmt, cursor, sql, map, graph) {
   if (prevUpper === "WITH") {
     return { kind: "cte-name", from: cursor, to: cursor, prefix: "" };
   }
-  if (prev.type === "identifier" || prev.type === "quoted-identifier") {
+  if (prev.type === "identifier" || prev.type === "quoted-identifier" || prevIsReservedAsIdent) {
     const from = prev.start;
     const to = cursor;
     const prefix = sql.slice(from, cursor);
-    const before = sig[sig.length - 2];
-    const beforeUpper = before ? before.text.toUpperCase() : "";
     if (beforeUpper === ".") {
       return { kind: "qualified-column", from, to, prefix };
     }
@@ -2241,7 +2261,7 @@ function buildCandidates(ctx, deps) {
   const graph = deps.graph;
   switch (ctx.kind) {
     case "relation":
-      addRelationCandidates(candidates, graph, ctx);
+      addRelationCandidates(candidates, graph, ctx, deps);
       addSchemaCandidates(candidates, graph, ctx);
       addKeywordCandidates(candidates, ctx, ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "AS", "ON", "USING", "WHERE"]);
       break;
@@ -2249,9 +2269,12 @@ function buildCandidates(ctx, deps) {
       addSchemaCandidates(candidates, graph, ctx);
       break;
     case "column":
-      addColumnCandidates(candidates, ctx, true);
+      addColumnCandidates(candidates, ctx, true, deps);
       addFunctionCandidates(candidates, ctx, graph);
       addKeywordCandidates(candidates, ctx, ["AS", "AND", "OR", "NOT", "IN", "BETWEEN", "LIKE", "IS NULL", "IS NOT NULL", "DESC", "ASC", "DISTINCT"]);
+      if (ctx.visibleRelations.length === 0 && !ctx.activeRelation) {
+        addKeywordCandidates(candidates, ctx, ["SELECT", "FROM", "WHERE", "JOIN", "INSERT INTO", "UPDATE", "DELETE FROM", "WITH", "UNION", "UNION ALL", "SELECT DISTINCT"]);
+      }
       break;
     case "qualified-column":
       addQualifiedColumnCandidates(candidates, ctx);
@@ -2265,7 +2288,7 @@ function buildCandidates(ctx, deps) {
       break;
     case "cte-name":
       addKeywordCandidates(candidates, ctx, ["AS"]);
-      addRelationCandidates(candidates, graph, ctx);
+      addRelationCandidates(candidates, graph, ctx, deps);
       break;
     case "jsonb-path":
       addJsonbPathCandidates(candidates, ctx, graph);
@@ -2315,12 +2338,33 @@ function computeKeySymbols(ctx) {
 }
 function matchesPrefix(label, prefix) {
   if (!prefix) return true;
-  return label.toLowerCase().includes(prefix.toLowerCase());
+  const p = prefix.toLowerCase();
+  const l = label.toLowerCase();
+  if (l.startsWith(p)) return true;
+  const segments = l.split(/(?=[A-Z])|[_\s.]+/).filter(Boolean);
+  if (segments.some((s) => s.toLowerCase().startsWith(p))) return true;
+  return false;
 }
-function addRelationCandidates(out, graph, ctx) {
+var RESERVED_WORDS = new Set(SQL_KEYWORDS.map((k) => k.label.toUpperCase()));
+function quoteIdentIfNeeded(name, quoted) {
+  if (quoted) return `"${name.replace(/"/g, '""')}"`;
+  const needsQuote = /[A-Z]/.test(name) || /[^a-z0-9_]/.test(name) || /^[0-9]/.test(name) || RESERVED_WORDS.has(name.toUpperCase());
+  return needsQuote ? `"${name.replace(/"/g, '""')}"` : name;
+}
+var SYSTEM_SCHEMAS = /* @__PURE__ */ new Set(["pg_catalog", "information_schema", "pg_toast", "pg_temp", "pg_toast_temp"]);
+function isNoiseRelation(schema, name) {
+  if (SYSTEM_SCHEMAS.has(schema.toLowerCase())) return true;
+  const lower = name.toLowerCase();
+  if (lower.startsWith("__ef") || lower === "__efmigrationshistory") return true;
+  if (lower.startsWith("pg_stat_") || lower.startsWith("pg_statio_")) return true;
+  return false;
+}
+function addRelationCandidates(out, graph, ctx, deps) {
   if (!graph) return;
+  const showSystem = deps.showSystemTables ?? false;
   for (const schema of Object.values(graph.schemas)) {
     for (const rel of Object.values(schema.relations)) {
+      if (!showSystem && isNoiseRelation(rel.schema, rel.name)) continue;
       const label = rel.schema === "public" ? rel.name : `${rel.schema}.${rel.name}`;
       if (!matchesPrefix(label, ctx.prefix) && !matchesPrefix(rel.name, ctx.prefix)) continue;
       const kind = rel.kind === "table" ? "table" : rel.kind === "view" ? "view" : "table";
@@ -2329,7 +2373,7 @@ function addRelationCandidates(out, graph, ctx) {
         label: rel.name,
         detail: `${rel.schema}.${rel.name} (${rel.kind})`,
         documentation: rel.comment,
-        insertText: rel.name,
+        insertText: quoteIdentIfNeeded(rel.name, rel.quoted),
         filterText: rel.name,
         score: 0,
         source: "schema",
@@ -2354,27 +2398,52 @@ function addSchemaCandidates(out, graph, ctx) {
     });
   }
 }
-function addColumnCandidates(out, ctx, includeAllVisible) {
+function addColumnCandidates(out, ctx, includeAllVisible, _deps) {
   if (ctx.activeRelation) {
-    addColumnsFromRelation(out, ctx.activeRelation, ctx.prefix);
+    addColumnsFromRelation(
+      out,
+      ctx.activeRelation,
+      ctx.prefix,
+      /* qualify */
+      false
+    );
     return;
   }
   if (includeAllVisible) {
-    for (const rel of ctx.visibleRelations) addColumnsFromRelation(out, rel, ctx.prefix);
+    const ambiguous = /* @__PURE__ */ new Set();
+    if (ctx.visibleRelations.length > 1) {
+      const seen = /* @__PURE__ */ new Map();
+      for (const rel of ctx.visibleRelations) {
+        if (!rel.columns) continue;
+        const local = /* @__PURE__ */ new Set();
+        for (const c of rel.columns) {
+          const k = c.key;
+          if (local.has(k)) continue;
+          local.add(k);
+          seen.set(k, (seen.get(k) ?? 0) + 1);
+        }
+      }
+      for (const [k, n] of seen) if (n > 1) ambiguous.add(k);
+    }
+    for (const rel of ctx.visibleRelations) {
+      addColumnsFromRelation(out, rel, ctx.prefix, ambiguous.size > 0, rel.alias, ambiguous);
+    }
   }
 }
-function addColumnsFromRelation(out, rel, prefix) {
+function addColumnsFromRelation(out, rel, prefix, qualify, alias, ambiguous) {
   if (!rel.columns) {
     return;
   }
   for (const c of rel.columns) {
     if (!matchesPrefix(c.name, prefix)) continue;
+    const needsQualify = qualify && ambiguous?.has(c.key) && !!alias;
+    const insertText = needsQualify ? `${alias}.${c.name}` : c.name;
     out.push({
       kind: "column",
       label: c.name,
       detail: c.dataType ? `${rel.name ? rel.name + "." : ""}${c.name} ${c.dataType}` : c.name,
       documentation: c.dataType,
-      insertText: c.name,
+      insertText,
       filterText: c.name,
       score: 0,
       source: "schema",
@@ -2385,7 +2454,13 @@ function addColumnsFromRelation(out, rel, prefix) {
 }
 function addQualifiedColumnCandidates(out, ctx) {
   if (ctx.activeRelation) {
-    addColumnsFromRelation(out, ctx.activeRelation, ctx.prefix);
+    addColumnsFromRelation(
+      out,
+      ctx.activeRelation,
+      ctx.prefix,
+      /* qualify */
+      false
+    );
   } else if (ctx.activeAlias) {
   }
 }
@@ -2494,7 +2569,13 @@ function flattenJsonbPaths(roots, wantJson) {
 }
 function addInsertColumnCandidates(out, ctx) {
   const target = ctx.visibleRelations[0];
-  if (target) addColumnsFromRelation(out, target, ctx.prefix);
+  if (target) addColumnsFromRelation(
+    out,
+    target,
+    ctx.prefix,
+    /* qualify */
+    false
+  );
 }
 function addTypeCandidates(out, ctx) {
   const commonTypes = [
@@ -3136,6 +3217,7 @@ var usageStats = [];
 var localUsage = /* @__PURE__ */ new Map();
 var snippets = [];
 var maxCandidates = 50;
+var showSystemTables = false;
 server.handle("ping", async () => ({ pong: true, version: DDL_PARSER_VERSION.toString() }));
 server.handle("set-active-graph", async (req) => {
   activeGraph = req.graph;
@@ -3158,6 +3240,7 @@ server.handle("set-snippets", async (req) => {
 });
 server.handle("set-config", async (req) => {
   maxCandidates = req.maxCandidates;
+  if (typeof req.showSystemTables === "boolean") showSystemTables = req.showSystemTables;
   return { acknowledged: true };
 });
 server.handle("record-usage", async (req) => {
@@ -3175,7 +3258,8 @@ server.handle("complete", async (req) => {
     snapshotId: activeSnapshotId,
     localUsage,
     snippets,
-    maxCandidates
+    maxCandidates,
+    showSystemTables
   };
   const { items } = buildCandidates(context, deps);
   return { items, context };

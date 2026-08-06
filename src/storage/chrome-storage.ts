@@ -23,6 +23,9 @@ export interface Pg4Settings {
   /** force-trigger shortcut (e.g. "Ctrl+Space"); macOS override */
   completionShortcut: string;
   historyRetentionDays: number;
+  /** when false (default), pg_catalog / information_schema / EF migration tables
+   *  are hidden from FROM relation candidates to reduce noise. */
+  showSystemTables: boolean;
   /** first-run flags */
   smartPasteHintDismissed: boolean;
 }
@@ -35,6 +38,7 @@ export const DEFAULT_SETTINGS: Pg4Settings = {
   maxCandidates: 50,
   completionShortcut: "Ctrl+Space",
   historyRetentionDays: 90,
+  showSystemTables: false,
   smartPasteHintDismissed: false,
 };
 
