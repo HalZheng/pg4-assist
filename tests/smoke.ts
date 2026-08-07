@@ -184,6 +184,15 @@ test("typing 'select' → keyword context, SELECT candidate present", () => {
   assert.ok(labels.includes("SELECT"), `SELECT should be a candidate; got ${labels.slice(0, 10).join(", ")}`);
 });
 
+test("typing a new 's' before existing SQL suggests SELECT", () => {
+  const sql = 's\nSELECT * FROM "BM"."FAS_Application"';
+  const ctx = ctxAt(sql, 1);
+  assert.equal(ctx.kind, "keyword", `kind should be 'keyword' (got ${ctx.kind})`);
+  assert.equal(ctx.prefix, "s");
+  const labels = labelsOf(buildCandidates(ctx, deps).items);
+  assert.ok(labels.includes("SELECT"), `SELECT should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+});
+
 console.log("\n[2] Typing 'from' (no space) suggests keywords, NOT table names");
 test("typing 'SELECT * from' (cursor at end of 'from') → keyword context", () => {
   const sql = "SELECT * from";
@@ -271,6 +280,17 @@ test("lowercase table users (unquoted) → insertText is \"public\".\"users\"", 
   const usersItem = items.find((i) => i.label === '"public"."users"');
   assert.ok(usersItem, '"public"."users" should be a candidate');
   assert.equal(usersItem!.insertText, '"public"."users"', `insertText should be "public"."users"; got ${usersItem!.insertText}`);
+});
+
+test("relation completion is followed by a space", () => {
+  const sql = 'SELECT * FROM "BM"."F"';
+  const ctx = ctxAt(sql, sql.length - 1, duplicateRelationGraph);
+  const item = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph }).items.find(
+    (candidate) => candidate.label === '"FAS_Application"'
+  );
+  assert.ok(item, "FAS_Application should be a candidate");
+  const applied = sql.slice(0, ctx.from) + `${quoteQualifiedIdentifier(item!.insertText)} ` + sql.slice(ctx.to);
+  assert.equal(applied, 'SELECT * FROM "BM"."FAS_Application" ');
 });
 
 test("same table name in different schemas stays distinguishable and fully qualified", () => {

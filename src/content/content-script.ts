@@ -463,7 +463,7 @@ class Pg4ContentScript {
   private applyCompletion(session: EditorSession, item: CompletionItem, range: { from: number; to: number }) {
     // SPEC §6.6: replace [from, to) via CodeMirror transaction.
     const insertText = item.kind === "table" || item.kind === "view"
-      ? quoteQualifiedIdentifier(item.insertText)
+      ? `${quoteQualifiedIdentifier(item.insertText)} `
       : item.insertText;
     this.sendToBridge({
       type: "apply-completion",

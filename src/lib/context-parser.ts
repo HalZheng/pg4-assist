@@ -508,6 +508,9 @@ function classifyCursor(
       to = prev.end;
     }
     const prefix = completionPrefix(sql, from, cursor, prev);
+    if (!prevPrev) {
+      return { kind: "keyword", from, to, prefix };
+    }
     if (isExpressionValueToken(prevPrev)) {
       return { kind: "keyword", from, to, prefix };
     }
