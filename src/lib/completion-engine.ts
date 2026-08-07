@@ -51,7 +51,7 @@ export function buildCandidates(ctx: CompletionContext, deps: CompletionEngineDe
     case "column":
       addColumnCandidates(candidates, ctx, true, deps);
       addFunctionCandidates(candidates, ctx, graph);
-      addKeywordCandidates(candidates, ctx, ["AS", "AND", "OR", "NOT", "IN", "BETWEEN", "LIKE", "IS NULL", "IS NOT NULL", "DESC", "ASC", "DISTINCT"]);
+      addKeywordCandidates(candidates, ctx, ["AS", "AND", "OR", "NOT", "IN", "BETWEEN", "LIKE", "IS NULL", "IS NOT NULL", "DESC", "ASC", "DISTINCT", "WHERE"]);
       // When there are no visible relations yet (e.g. user is at "SELECT s" with no
       // FROM clause), also offer statement keywords so typing "sel" surfaces SELECT
       // and the user is guided toward writing FROM. Matches VSCode SQL behaviour.
@@ -142,6 +142,17 @@ function matchesPrefix(label: string, prefix: string): boolean {
   return false;
 }
 
+function matchesRelationName(label: string, prefix: string): boolean {
+  if (matchesPrefix(label, prefix)) return true;
+  if (!prefix) return false;
+
+  const p = prefix.toLowerCase();
+  return label
+    .toLowerCase()
+    .split(/[_\s.]+/)
+    .some((segment) => segment.includes(p));
+}
+
 /** Quote relation identifiers consistently so completions preserve exact DDL names. */
 function quoteIdentIfNeeded(name: string, _quoted: boolean): string {
   return quoteIdentifier(name);
@@ -171,9 +182,9 @@ function addRelationCandidates(out: ScoredCandidate[], graph: SchemaGraph | null
       const qualifiedName = `${schema.name}.${rel.name}`;
       const qualifiedIdentifier = `${quoteIdentIfNeeded(schema.name, schema.quoted)}.${quoteIdentIfNeeded(rel.name, rel.quoted)}`;
       if (
-        !matchesPrefix(qualifiedIdentifier, ctx.prefix) &&
-        !matchesPrefix(qualifiedName, ctx.prefix) &&
-        !matchesPrefix(rel.name, ctx.prefix)
+        !matchesRelationName(qualifiedIdentifier, ctx.prefix) &&
+        !matchesRelationName(qualifiedName, ctx.prefix) &&
+        !matchesRelationName(rel.name, ctx.prefix)
       ) {
         continue;
       }
@@ -199,10 +210,10 @@ function addSchemaCandidates(out: ScoredCandidate[], graph: SchemaGraph | null, 
   for (const schema of Object.values(graph.schemas)) {
     if (!matchesPrefix(schema.name, ctx.prefix)) continue;
     out.push({
-      kind: "keyword",
+      kind: "schema",
       label: quoteIdentifier(schema.name),
       detail: "schema",
-      insertText: quoteIdentifier(schema.name),
+      insertText: `${quoteIdentifier(schema.name)}.`,
       filterText: schema.name,
       score: 0,
       source: "schema",
@@ -217,7 +228,7 @@ function addSchemaRelationCandidates(out: ScoredCandidate[], graph: SchemaGraph 
   const showSystem = deps.showSystemTables ?? false;
   for (const relation of Object.values(schema.relations)) {
     if (!showSystem && isNoiseRelation(relation.schema, relation.name)) continue;
-    if (!matchesPrefix(relation.name, ctx.prefix)) continue;
+    if (!matchesRelationName(relation.name, ctx.prefix)) continue;
     out.push({
       kind: relation.kind === "view" ? "view" : "table",
       label: quoteIdentifier(relation.name),

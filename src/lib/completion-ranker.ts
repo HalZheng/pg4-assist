@@ -50,7 +50,7 @@ export function prefixMatchScore(prefix: string, label: string): number {
   const l = label.toLowerCase();
   if (l === p) return 1.0;
   if (l.startsWith(p)) return 0.9;
-  const segments = l.split(/(?=[A-Z])|[_\s.]+/).filter(Boolean);
+  const segments = label.split(/(?=[A-Z])|[_\s.]+/).filter(Boolean);
   if (segments.some((s) => s.toLowerCase().startsWith(p))) return 0.7;
   if (fuzzyContains(l, p)) return 0.4;
   return 0;
@@ -115,6 +115,7 @@ export function sortItems<T extends CompletionItem>(items: T[]): T[] {
   const priority: Record<CompletionItemKind, number> = {
     table: 1,
     view: 1,
+    schema: 1,
     cte: 1,
     column: 2,
     function: 3,

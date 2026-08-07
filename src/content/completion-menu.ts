@@ -325,6 +325,7 @@ export class CompletionMenu {
       .pg4-completion-item[data-kind="column"] .pg4-icon { color: #0969da; }
       .pg4-completion-item[data-kind="table"] .pg4-icon,
       .pg4-completion-item[data-kind="view"] .pg4-icon { color: #1a7f37; }
+      .pg4-completion-item[data-kind="schema"] .pg4-icon { color: #8250df; }
       .pg4-completion-item[data-kind="function"] .pg4-icon { color: #8250df; }
       .pg4-completion-item[data-kind="keyword"] .pg4-icon { color: var(--pg4-muted); }
       .pg4-completion-item[data-kind="jsonb-path"] .pg4-icon { color: #bf8700; }
@@ -352,6 +353,7 @@ export class CompletionMenu {
       :host([data-pg4-theme="dark"]) .pg4-completion-item[data-kind="column"] .pg4-icon { color: #58a6ff; }
       :host([data-pg4-theme="dark"]) .pg4-completion-item[data-kind="table"] .pg4-icon,
       :host([data-pg4-theme="dark"]) .pg4-completion-item[data-kind="view"] .pg4-icon { color: #3fb950; }
+      :host([data-pg4-theme="dark"]) .pg4-completion-item[data-kind="schema"] .pg4-icon { color: #bc8cff; }
       :host([data-pg4-theme="dark"]) .pg4-completion-item[data-kind="function"] .pg4-icon { color: #bc8cff; }
       :host([data-pg4-theme="dark"]) .pg4-completion-item[data-kind="jsonb-path"] .pg4-icon { color: #d29922; }
     `;
@@ -363,6 +365,7 @@ function iconFor(kind: CompletionItem["kind"]): string {
   switch (kind) {
     case "table": return "▦";
     case "view": return "◳";
+    case "schema": return "◇";
     case "column": return "⫶";
     case "function": return "ƒ";
     case "keyword": return "K";

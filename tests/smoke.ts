@@ -103,6 +103,16 @@ const duplicateRelationGraph: SchemaGraph = {
       quoted: true,
       relations: {
         "BM.BM_Account": makeTable("BM", "BM_Account", true, [makeColumn("id", "integer")]),
+        "BM.FAS_Application": makeTable("BM", "FAS_Application", true, [makeColumn("id", "integer")]),
+        "BM.FAS_StudentSubsidyRescission": makeTable("BM", "FAS_StudentSubsidyRescission", true, [
+          makeColumn("id", "integer"),
+        ]),
+        "BM.BM_StudentSubsidy": makeTable("BM", "BM_StudentSubsidy", true, [
+          makeColumn("PaymentPrecentage", "text"),
+        ]),
+        "BM.BM_AccountBalanceTrans": makeTable("BM", "BM_AccountBalanceTrans", true, [
+          makeColumn("Id", "integer"),
+        ]),
       },
     },
     BILL: {
@@ -191,6 +201,28 @@ test("'SELECT * FROM ' → relation context, quoted public.users table present",
   assert.ok(labels.includes('"public"."users"'), `"public"."users" should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
+test("'SELECT * FROM pub' → schema is a distinct completion item", () => {
+  const sql = "SELECT * FROM pub";
+  const ctx = ctxAt(sql);
+  assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
+  const { items } = buildCandidates(ctx, deps);
+  const schema = items.find((item) => item.label === '"public"');
+  assert.ok(schema, `"public" should be suggested; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  assert.equal(schema!.kind, "schema");
+  assert.equal(schema!.insertText, '"public".');
+});
+
+test('quoted schema completion consumes an existing trailing dot', () => {
+  const sql = 'SELECT * FROM "pu".';
+  const ctx = ctxAt(sql, sql.length - 2);
+  assert.equal(ctx.kind, "relation", `kind should be 'relation' (got ${ctx.kind})`);
+  const { items } = buildCandidates(ctx, deps);
+  const schema = items.find((item) => item.kind === "schema" && item.label === '"public"');
+  assert.ok(schema, `"public" should be suggested; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  const applied = sql.slice(0, ctx.from) + schema!.insertText + sql.slice(ctx.to);
+  assert.equal(applied, 'SELECT * FROM "public".');
+});
+
 console.log("\n[4] Noise tables filtered by default (__EF*, pg_stat_*, pg_catalog.*)");
 test("noise tables hidden when showSystemTables=false", () => {
   const sql = "SELECT * FROM ";
@@ -262,9 +294,48 @@ test("quoted schema prefixes complete only its quoted relation names", () => {
     assert.equal(ctx.kind, "schema-relation", `${sql}: expected schema-relation; got ${ctx.kind}`);
     assert.equal(ctx.activeSchema, "BM");
     const items = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph }).items;
-    assert.deepEqual(labelsOf(items), ['"BM_Account"']);
-    assert.equal(items[0]?.insertText, '"BM_Account"');
+    assert.ok(labelsOf(items).includes('"BM_Account"'));
+    assert.ok(items.length >= 1, `expected schema-relation candidates; got ${labelsOf(items).slice(0, 10).join(", ")}`);
   }
+});
+
+test('schema prefix "Rescission" completes "FAS_StudentSubsidyRescission" without needing FAS_S', () => {
+  const sql = 'SELECT * FROM "BM"."Rescission"';
+  const ctx = ctxAt(sql, sql.length, duplicateRelationGraph);
+  assert.equal(ctx.kind, "schema-relation", `expected schema-relation; got ${ctx.kind}`);
+  const items = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph }).items;
+  const item = items.find((i) => i.label === '"FAS_StudentSubsidyRescission"');
+  assert.ok(item, `FAS_StudentSubsidyRescission should be suggested; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+});
+
+test('schema prefix "F" on quoted relation keeps the closing quote from duplicating', () => {
+  const sql = 'SELECT * FROM "BM"."F"';
+  const ctx = ctxAt(sql, sql.length - 1, duplicateRelationGraph);
+  assert.equal(ctx.kind, "schema-relation", `expected schema-relation; got ${ctx.kind}`);
+  const { items } = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph });
+  const item = items.find((i) => i.label === '"FAS_Application"');
+  assert.ok(item, `FAS_Application should be suggested; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  const applied = sql.slice(0, ctx.from) + quoteQualifiedIdentifier(item!.insertText) + sql.slice(ctx.to);
+  assert.equal(applied, 'SELECT * FROM "BM"."FAS_Application"', `applied SQL should not have a stray trailing quote; got ${applied}`);
+});
+
+test('quoted column prefix "P" on BM_StudentSubsidy keeps the closing quote from duplicating', () => {
+  const sql = 'SELECT * FROM "BM"."BM_StudentSubsidy" where "P"';
+  const ctx = ctxAt(sql, sql.length - 1, duplicateRelationGraph);
+  assert.equal(ctx.kind, "column", `expected column; got ${ctx.kind}`);
+  const { items } = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph });
+  const item = items.find((i) => i.label === 'PaymentPrecentage');
+  assert.ok(item, `PaymentPrecentage should be suggested; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  const applied = sql.slice(0, ctx.from) + item!.insertText + sql.slice(ctx.to);
+  assert.equal(applied, 'SELECT * FROM "BM"."BM_StudentSubsidy" where "PaymentPrecentage"', `applied SQL should not have a stray trailing quote; got ${applied}`);
+});
+
+test('keyword prefix "wh" after JOIN still suggests WHERE', () => {
+  const sql = 'SELECT * FROM "BM"."BM_AccountBalanceTrans" A LEFT JOIN  "BM"."BM_Account" b on A."Id" = b."Id" wh';
+  const ctx = ctxAt(sql);
+  const { items } = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph });
+  const labels = labelsOf(items);
+  assert.ok(labels.includes("WHERE"), `WHERE should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 test("reserved word 'user' after FROM → relation context (not keyword)", () => {

@@ -498,7 +498,15 @@ function classifyCursor(
   if (prev.type === "identifier" || prev.type === "quoted-identifier" || prevIsReservedAsIdent) {
     // The replacement range covers the identifier being typed.
     const from = prev.start;
-    const to = cursor;
+    let to = cursor;
+    if (
+      prev.type === "quoted-identifier" &&
+      prev.text.endsWith('"') &&
+      cursor > prev.start &&
+      cursor < prev.end
+    ) {
+      to = prev.end;
+    }
     const prefix = completionPrefix(sql, from, cursor, prev);
     if (isExpressionValueToken(prevPrev)) {
       return { kind: "keyword", from, to, prefix };
@@ -533,6 +541,9 @@ function classifyCursor(
       return { kind: "qualified-column", from, to, prefix };
     }
     if (isRelationContextKeyword(beforeUpper)) {
+      if (to < sql.length && sql[to] === ".") {
+        to++;
+      }
       return { kind: "relation", from, to, prefix };
     }
     if (beforeUpper === "VALUES") {

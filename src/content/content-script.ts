@@ -392,8 +392,9 @@ class Pg4ContentScript {
       const prefix = currentPrefix(sql, cursor);
       const context = buildCompletionContext({ sql, cursor, graph: this.activeGraph });
       const canShowEmptyColumnList = context.kind === "column" || context.kind === "qualified-column";
+      const canShowRelationList = context.kind === "relation" || context.kind === "schema-relation" || context.kind === "cte-name";
       const canShowSingleKeyword = context.kind === "keyword" && prefix.length > 0;
-      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor) && !canShowEmptyColumnList && !canShowSingleKeyword) {
+      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor) && !canShowEmptyColumnList && !canShowSingleKeyword && !canShowRelationList) {
         // Prefix collapsed (e.g. user typed a space or moved past the token). Close
         // any open menu so a subsequent Tab/Enter cannot commit at a stale
         // replaceRange — this is the root cause of "completion inserted at the

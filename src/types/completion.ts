@@ -59,6 +59,7 @@ export interface CompletionContext {
 export type CompletionItemKind =
   | "table"
   | "view"
+  | "schema"
   | "column"
   | "function"
   | "keyword"
