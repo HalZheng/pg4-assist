@@ -1,0 +1,36 @@
+# PG4 Smart Assist — GitLab CI
+# 前置条件：项目需配置可用的 Runner（shared 或 project runner）。
+# 流程：typecheck → 冒烟测试 → 构建 MV3 扩展 → 上传 dist/ 产物（可在 CI 页面下载后直接加载进浏览器）。
+image: node:20
+
+stages:
+  - check
+  - test
+  - build
+
+cache:
+  paths:
+    - node_modules/
+
+before_script:
+  - npm ci
+
+typecheck:
+  stage: check
+  script:
+    - npm run typecheck
+
+smoke-test:
+  stage: test
+  script:
+    - npm test
+
+build:
+  stage: build
+  script:
+    - npm run build
+  artifacts:
+    name: "$CI_PROJECT_NAME-dist"
+    paths:
+      - dist/
+    expire_in: 1 week

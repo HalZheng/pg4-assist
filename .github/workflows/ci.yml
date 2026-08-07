@@ -1,0 +1,40 @@
+# PG4 Smart Assist — GitHub Actions CI
+# 触发：push 到 main / 任意 PR。流程：typecheck → 冒烟测试 → 构建 MV3 扩展 → 上传 dist/ 产物。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run smoke tests
+        run: npm test
+
+      - name: Build extension (MV3)
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg4-smart-assist-dist
+          path: dist/
+          if-no-files-found: error
