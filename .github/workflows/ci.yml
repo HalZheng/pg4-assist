@@ -1,0 +1,71 @@
+# PG4 Smart Assist — GitHub Actions CI
+# 触发：push 到 main / 任意 PR。流程：typecheck → 冒烟测试 → 构建 MV3 扩展 → 上传 dist/ 产物。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run smoke tests
+        run: npm test
+
+      - name: Build extension (MV3)
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg4-smart-assist-dist
+          path: dist/
+          if-no-files-found: error
+
+  # 每次 push 到 main 且构建成功后，自动创建/更新一个固定 tag 的“最新版”Release
+  release:
+    name: Publish auto Release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pg4-smart-assist-dist
+          path: dist/
+
+      - name: Package extension zip
+        run: (cd dist && zip -r ../pg4-smart-assist.zip .)
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-build
+          name: "PG4 Smart Assist (auto)"
+          body: "自动构建产物（push 到 main 时生成） · 提交 ${{ github.sha }}"
+          files: pg4-smart-assist.zip
+          make_latest: true
+          update_release: true
