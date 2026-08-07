@@ -1,12 +1,26 @@
 # PG4 Smart Assist — GitLab CI
-# 前置条件：项目需配置可用的 Runner（shared 或 project runner）。
-# 流程：typecheck → 冒烟测试 → 构建 MV3 扩展 → 上传 dist/ 产物（可在 CI 页面下载后直接加载进浏览器）。
+# 前置条件：
+#   - 项目需配置可用的 Runner（shared 或 project runner）。
+#   - 推送默认分支（main）的用户需具备 Maintainer/Owner 权限：
+#     CI_JOB_TOKEN 继承触发用户的权限，用于删除旧 tag 与创建 Release。
+# 流程（push 到 main）：typecheck → 冒烟测试 → 构建 MV3 → 打包 → 发布/更新固定 tag 的 Release。
+# 其他分支：仅执行检查与构建，不发布。
+# 与 GitHub 对等：固定 tag auto-build，每次 push 覆盖式更新（类似 GitHub 的 auto-build Release）。
 image: node:20
+
+# 只在“分支 push”与“MR”等场景创建 pipeline，避免 Release 创建 tag 时触发额外的 tag pipeline 造成循环。
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
 
 stages:
   - check
   - test
   - build
+  - release
 
 cache:
   paths:
@@ -29,8 +43,40 @@ build:
   stage: build
   script:
     - npm run build
+    # node:20 (debian) 无 zip 命令，用 tar 打包产物；tar.gz 解压后即为可直接加载的扩展目录。
+    - tar -czf pg4-smart-assist.tar.gz -C dist .
   artifacts:
     name: "$CI_PROJECT_NAME-dist"
     paths:
       - dist/
+      - pg4-smart-assist.tar.gz
     expire_in: 1 week
+
+# 仅默认分支：删除旧的 auto-build tag（连带其 Release）后，重建 tag + Release。
+release:
+  stage: release
+  before_script: []
+  dependencies:
+    - build
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    # GitLab 删除 tag 会连带删除其关联的 Release；tag 不存在时返回 404，忽略即可。
+    - 'curl --silent --show-error --fail --request DELETE --header "PRIVATE-TOKEN: ${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/tags/auto-build" || true'
+  artifacts:
+    paths:
+      - pg4-smart-assist.tar.gz
+    expire_in: 1 week
+  release:
+    tag_name: auto-build
+    ref: $CI_COMMIT_SHA
+    name: "PG4 Smart Assist (auto)"
+    description: |
+      自动构建产物（push 到 $CI_DEFAULT_BRANCH 时生成）· 提交 $CI_COMMIT_SHORT_SHA
+
+      下载并解压 pg4-smart-assist.tar.gz 后，将解压出的目录作为“已解压的扩展程序”加载进浏览器
+      （chrome://extensions → 开发者模式 → 加载已解压的扩展程序 → 选择该目录）。
+    assets:
+      links:
+        - name: "pg4-smart-assist.tar.gz"
+          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/download"
