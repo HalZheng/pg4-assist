@@ -383,14 +383,10 @@ class Pg4ContentScript {
 
   private async requestCompletion(session: EditorSession, sql: string, cursor: number, force: boolean) {
     if (!this.worker) return;
-    if (this.settings.completionTriggerMode === "manual" && !force) {
-      if (session.menu) this.closeMenu(session, "external");
-      return;
-    }
-    // Check trigger conditions.
+    if (this.settings.completionTriggerMode === "manual" && !force) return;
     if (!force) {
-      const prefix = currentPrefix(sql, cursor);
       const context = buildCompletionContext({ sql, cursor, graph: this.activeGraph });
+      const prefix = context.prefix;
       const canShowEmptyColumnList = context.kind === "column" || context.kind === "qualified-column";
       const canShowRelationList = context.kind === "relation" || context.kind === "schema-relation" || context.kind === "cte-name";
       const canShowSingleKeyword = context.kind === "keyword" && prefix.length > 0;

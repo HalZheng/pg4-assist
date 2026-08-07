@@ -66,6 +66,12 @@ const graph: SchemaGraph = {
           makeColumn("user_id", "integer", { ordinal: 2 }),
           makeColumn("total", "numeric", { ordinal: 3 }),
         ]),
+        "public.StakeholderProfile": {
+          ...makeTable("public", "StakeholderProfile", true, [
+            makeColumn("AcademicSubLevel", "text", { ordinal: 1 }),
+          ]),
+          key: "public.StakeholderProfile",
+        },
         "public.__EFConfigurationDbContextMigrationsHistory": makeTable(
           "public",
           "__EFConfigurationDbContextMigrationsHistory",
@@ -373,6 +379,16 @@ test("'SELECT * FROM users WHERE ' → column context, column 'id' present", () 
   assert.equal(insertTextOf(items, "id"), '"id"');
 });
 
+test("column substring prefix 'sub' suggests AcademicSubLevel", () => {
+  const sql = 'SELECT * FROM "public"."StakeholderProfile" a WHERE sub';
+  const ctx = ctxAt(sql);
+  assert.equal(ctx.kind, "column", `kind should be 'column' (got ${ctx.kind})`);
+  const items = buildCandidates(ctx, deps).items;
+  const column = items.find((item) => item.label === "AcademicSubLevel");
+  assert.ok(column, `AcademicSubLevel should be suggested; got ${labelsOf(items).slice(0, 10).join(", ")}`);
+  assert.equal(column!.insertText, '"AcademicSubLevel"');
+});
+
 test("'SELECT name FROM users GROUP BY ' → column context, full column list present", () => {
   const sql = "SELECT name FROM users GROUP BY ";
   const ctx = ctxAt(sql);
@@ -542,6 +558,17 @@ test("predicate value followed by 'o' suggests ORDER BY and OR, not columns", ()
   assert.ok(labels.includes("OR"), `OR should be suggested; got ${labels.slice(0, 10).join(", ")}`);
   assert.ok(labels.includes("ORDER BY"), `ORDER BY should be suggested; got ${labels.slice(0, 10).join(", ")}`);
   assert.ok(!labels.includes("id"), `columns should not be suggested after a completed predicate; got ${labels.slice(0, 10).join(", ")}`);
+});
+
+test("quoted JOIN predicate followed by 'w' suggests WHERE", () => {
+  const sql = [
+    'SELECT * FROM "public"."StakeholderProfile" a',
+    'LEFT JOIN "public"."Relationship_Family" b ON "Uin" = "PrimaryUin"',
+    "w",
+  ].join("\n");
+  const ctx = ctxAt(sql);
+  const labels = labelsOf(buildCandidates(ctx, deps).items);
+  assert.ok(labels.includes("WHERE"), `WHERE should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 console.log("\n[12] Payload guards bound local parsing work");

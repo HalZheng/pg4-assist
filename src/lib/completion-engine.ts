@@ -287,7 +287,7 @@ function addColumnsFromRelation(
     return;
   }
   for (const c of rel.columns) {
-    if (!matchesPrefix(c.name, prefix)) continue;
+    if (!matchesRelationName(c.name, prefix)) continue;
     // Qualify with alias only when the column is ambiguous across visible relations
     // (multi-table) AND this relation has an alias. Column identifiers are always
     // quoted to preserve their exact PostgreSQL DDL spelling.
