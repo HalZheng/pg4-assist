@@ -498,7 +498,21 @@ function classifyCursor(
   if (prev.type === "identifier" || prev.type === "quoted-identifier" || prevIsReservedAsIdent) {
     // The replacement range covers the identifier being typed.
     const from = prev.start;
-    const to = cursor;
+    // When the cursor sits inside a CLOSED quoted identifier (typical when the
+    // editor auto-pairs "" and the user keeps typing before the closing "),
+    // extend `to` to include the closing ". Otherwise the user's closing "
+    // survives the replacement and shows up as a stray trailing quote in the
+    // inserted identifier (e.g. "F" → "FAS_Application""). For unterminated
+    // quotes (no auto-pair) prev.end === cursor and this branch is a no-op.
+    let to = cursor;
+    if (
+      prev.type === "quoted-identifier" &&
+      prev.text.endsWith('"') &&
+      cursor > prev.start &&
+      cursor < prev.end
+    ) {
+      to = prev.end;
+    }
     const prefix = completionPrefix(sql, from, cursor, prev);
     if (isExpressionValueToken(prevPrev)) {
       return { kind: "keyword", from, to, prefix };

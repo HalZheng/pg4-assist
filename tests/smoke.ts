@@ -489,6 +489,69 @@ test("SQL payload guard rejects cursors outside the document", () => {
   assert.doesNotThrow(() => assertSqlPayload("SELECT 1", 8));
 });
 
+console.log("\n[13] Auto-paired closing quote is replaced, not duplicated");
+test("'FROM \"BM\".\"B\"' (cursor before closing \") → schema-relation, to extends past closing \"", () => {
+  // pgAdmin4 auto-pairs typed ", so the real buffer is "BM"."B" with cursor
+  // sitting BEFORE the closing ". Without the fix, the closing " survives the
+  // replacement and the user sees "BM"."BAS_Application"" (extra trailing ").
+  const sql = 'SELECT * FROM "BM"."B"';
+  const cursor = sql.length - 1; // before closing "
+  const ctx = buildCompletionContext({ sql, cursor, graph: duplicateRelationGraph });
+  assert.equal(ctx.kind, "schema-relation", `expected schema-relation; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "B", `prefix should be 'B'; got '${ctx.prefix}'`);
+  // The replacement range must include the closing " so it gets replaced.
+  assert.equal(ctx.to, sql.length, `to should include closing "; got ctx.to=${ctx.to}, expected ${sql.length}`);
+  // Smoke-check that a real candidate would replace the whole "B" token.
+  const { items } = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph });
+  const item = items.find((i) => i.label === '"BM_Account"');
+  assert.ok(item, `BM_Account candidate should be present; got ${labelsOf(items).slice(0, 5).join(", ")}`);
+  // Simulate the dispatch: replace [from, to) with insertText.
+  const before = sql.slice(0, ctx.from);
+  const after = sql.slice(ctx.to);
+  const applied = before + item!.insertText + after;
+  assert.equal(applied, 'SELECT * FROM "BM"."BM_Account"', `applied SQL should not have a stray trailing "; got ${applied}`);
+});
+
+test("'WHERE \"i\"' (cursor before closing \") → column context, to extends past closing \"", () => {
+  // Use BM_Account (exists in the test fixture's BM schema) so visibleRelations
+  // resolves and the 'id' column is offered.
+  const sql = 'SELECT * FROM "BM"."BM_Account" WHERE "i"';
+  const cursor = sql.length - 1; // before closing "
+  const ctx = buildCompletionContext({ sql, cursor, graph: duplicateRelationGraph });
+  assert.equal(ctx.kind, "column", `expected column; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "i", `prefix should be 'i'; got '${ctx.prefix}'`);
+  assert.equal(ctx.to, sql.length, `to should include closing "; got ctx.to=${ctx.to}, expected ${sql.length}`);
+  const { items } = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph });
+  const item = items.find((i) => i.label === "id");
+  assert.ok(item, `id column candidate should be present; got ${labelsOf(items).slice(0, 5).join(", ")}`);
+  const before = sql.slice(0, ctx.from);
+  const after = sql.slice(ctx.to);
+  const applied = before + item!.insertText + after;
+  assert.equal(applied, 'SELECT * FROM "BM"."BM_Account" WHERE "id"', `applied SQL should not have stray trailing "; got ${applied}`);
+});
+
+test("unterminated quote (no auto-pair) is unaffected by the fix", () => {
+  // When the editor does NOT auto-pair, the user's input is "BM"."B (unterminated).
+  // prev.end === cursor, so the fix's condition (cursor < prev.end) is false and
+  // behavior is unchanged: replace [from, cursor) with the quoted insertText.
+  const sql = 'SELECT * FROM "BM"."B';
+  const cursor = sql.length; // at end (unterminated)
+  const ctx = buildCompletionContext({ sql, cursor, graph: duplicateRelationGraph });
+  assert.equal(ctx.kind, "schema-relation", `expected schema-relation; got ${ctx.kind}`);
+  assert.equal(ctx.prefix, "B", `prefix should be 'B'; got '${ctx.prefix}'`);
+  assert.equal(ctx.to, cursor, `to should equal cursor for unterminated quote; got ctx.to=${ctx.to}`);
+});
+
+test("cursor after closing quote (already-closed identifier) is unaffected", () => {
+  // User has fully typed "BM_Account" and moved past the closing ". prev.end === cursor.
+  // The fix's condition (cursor < prev.end) is false — no extension.
+  const sql = 'SELECT * FROM "BM"."BM_Account"';
+  const cursor = sql.length; // after closing "
+  const ctx = buildCompletionContext({ sql, cursor, graph: duplicateRelationGraph });
+  // kind here is whatever the classifier decides post-identifier; the point is `to`.
+  assert.equal(ctx.to, cursor, `to should equal cursor when cursor is at/after prev.end; got ctx.to=${ctx.to}`);
+});
+
 // ---- summary --------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failed} failed`);
