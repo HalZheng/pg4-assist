@@ -60,12 +60,12 @@ jobs:
       - name: Package extension zip
         run: (cd dist && zip -r ../pg4-smart-assist.zip .)
 
-      - name: Create or update auto Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete auto-build --yes --cleanup-tag 2>/dev/null || true
-          gh release create auto-build pg4-smart-assist.zip \
-            --title "PG4 Smart Assist (auto)" \
-            --notes "自动构建产物（push 到 main 时生成） · 提交 ${{ github.sha }}" \
-            --latest
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-build
+          name: "PG4 Smart Assist (auto)"
+          body: "自动构建产物（push 到 main 时生成） · 提交 ${{ github.sha }}"
+          files: pg4-smart-assist.zip
+          make_latest: true
+          update_release: true
