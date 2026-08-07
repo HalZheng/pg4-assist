@@ -109,7 +109,11 @@ const duplicateRelationGraph: SchemaGraph = {
       quoted: true,
       relations: {
         "BM.BM_Account": makeTable("BM", "BM_Account", true, [makeColumn("id", "integer")]),
-        "BM.FAS_Application": makeTable("BM", "FAS_Application", true, [makeColumn("id", "integer")]),
+        "BM.FAS_Application": makeTable("BM", "FAS_Application", true, [
+          makeColumn("id", "integer"),
+          makeColumn("Address", "text"),
+          makeColumn("Uin", "text"),
+        ]),
         "BM.FAS_StudentSubsidyRescission": makeTable("BM", "FAS_StudentSubsidyRescission", true, [
           makeColumn("id", "integer"),
         ]),
@@ -397,6 +401,32 @@ test("'SELECT * FROM users WHERE ' → column context, column 'id' present", () 
   const labels = labelsOf(items);
   assert.ok(labels.includes("id"), `column 'id' should be present; got ${labels.slice(0, 10).join(", ")}`);
   assert.equal(insertTextOf(items, "id"), '"id"');
+});
+
+test("SELECT projection prefixes suggest FAS_Application columns", () => {
+  for (const { prefix, column } of [
+    { prefix: "u", column: "Uin" },
+    { prefix: "a", column: "Address" },
+  ]) {
+    const sql = `SELECT ${prefix} FROM "BM"."FAS_Application" LIMIT 100;`;
+    const ctx = ctxAt(sql, `SELECT ${prefix}`.length, duplicateRelationGraph);
+    assert.equal(ctx.kind, "column", `${prefix}: expected column context; got ${ctx.kind}`);
+    const item = buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph }).items.find(
+      (candidate) => candidate.label === column
+    );
+    assert.ok(item, `${prefix}: ${column} should be suggested`);
+    const applied = sql.slice(0, ctx.from) + item!.insertText + sql.slice(ctx.to);
+    assert.equal(applied, `SELECT "${column}" FROM "BM"."FAS_Application" LIMIT 100;`);
+  }
+});
+
+test("empty SELECT projection includes Uin and Address", () => {
+  const sql = 'SELECT  FROM "BM"."FAS_Application" LIMIT 100;';
+  const ctx = ctxAt(sql, "SELECT ".length, duplicateRelationGraph);
+  assert.equal(ctx.kind, "column", `expected column context; got ${ctx.kind}`);
+  const labels = labelsOf(buildCandidates(ctx, { ...deps, graph: duplicateRelationGraph }).items);
+  assert.ok(labels.includes("Uin"), `Uin should be suggested; got ${labels.slice(0, 10).join(", ")}`);
+  assert.ok(labels.includes("Address"), `Address should be suggested; got ${labels.slice(0, 10).join(", ")}`);
 });
 
 test("column substring prefix 'sub' suggests AcademicSubLevel", () => {

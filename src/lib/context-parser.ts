@@ -659,6 +659,7 @@ function isAfterCompletedRelation(tokens: Token[], map: RelationMap): boolean {
 function isSelectProjectionContinuation(tokens: Token[]): boolean {
   const previous = tokens[tokens.length - 2];
   if (!previous || previous.text === "," || previous.text.toUpperCase() === "AS") return false;
+  if (previous.text.toUpperCase() === "SELECT") return false;
 
   for (let index = tokens.length - 2; index >= 0; index--) {
     const keyword = tokens[index]!.text.toUpperCase();
