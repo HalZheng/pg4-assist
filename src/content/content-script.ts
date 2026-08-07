@@ -29,6 +29,8 @@ type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : nev
 type BridgeCommand = DistributiveOmit<ExtensionToBridgeMessage, "version" | "source" | "nonce" | "requestId">;
 import type { CompletionItem, EditorStateSnapshot } from "../types/completion";
 import type { SchemaGraph } from "../types/schema-graph";
+import { buildCompletionContext } from "../lib/context-parser";
+import { quoteQualifiedIdentifier } from "../lib/sql-identifiers";
 import type { Diagnostic, QueryHistoryEntry, Snippet, UsageStat } from "../types/editor";
 import { WorkerRpcClient } from "../runtime/worker-rpc";
 import { ensureOverlayHost, getShadow, onThemeChange } from "./overlay-host";
@@ -67,6 +69,13 @@ interface EditorSession {
   hoverDebounce: number | null;
 }
 
+interface PendingExplainExecution {
+  editorId: string;
+  expectedSql: string;
+  target: HTMLElement;
+  timeoutId: number;
+}
+
 // ---------------------------------------------------------------------------
 // Content script singleton
 // ---------------------------------------------------------------------------
@@ -84,6 +93,7 @@ class Pg4ContentScript {
   private globalDiagnostics: DiagnosticsOverlay | null = null;
   private initialized = false;
   private executeClickInterceptor: ((ev: Event) => void) | null = null;
+  private pendingExplainExecution: PendingExplainExecution | null = null;
 
   async init() {
     if (this.initialized) return;
@@ -290,6 +300,7 @@ class Pg4ContentScript {
     s.state = { editorId, sql, cursor, selection: { from: selection.from, to: selection.to } };
     s.scrollRect = scrollRect as DOMRectLike | undefined;
     this.activeEditorId = editorId;
+    this.executePendingExplain(editorId, sql);
 
     // Trigger completion (debounced).
     if (kind === "input" || kind === "paste") {
@@ -379,7 +390,10 @@ class Pg4ContentScript {
     // Check trigger conditions.
     if (!force) {
       const prefix = currentPrefix(sql, cursor);
-      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor)) {
+      const context = buildCompletionContext({ sql, cursor, graph: this.activeGraph });
+      const canShowEmptyColumnList = context.kind === "column" || context.kind === "qualified-column";
+      const canShowSingleKeyword = context.kind === "keyword" && prefix.length > 0;
+      if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor) && !canShowEmptyColumnList && !canShowSingleKeyword) {
         // Prefix collapsed (e.g. user typed a space or moved past the token). Close
         // any open menu so a subsequent Tab/Enter cannot commit at a stale
         // replaceRange — this is the root cause of "completion inserted at the
@@ -451,12 +465,15 @@ class Pg4ContentScript {
 
   private applyCompletion(session: EditorSession, item: CompletionItem, range: { from: number; to: number }) {
     // SPEC §6.6: replace [from, to) via CodeMirror transaction.
+    const insertText = item.kind === "table" || item.kind === "view"
+      ? quoteQualifiedIdentifier(item.insertText)
+      : item.insertText;
     this.sendToBridge({
       type: "apply-completion",
       editorId: session.editorId,
       from: range.from,
       to: range.to,
-      insert: item.insertText,
+      insert: insertText,
     });
     // Record usage locally (worker increments per-session counter).
     if (this.worker) {
@@ -620,20 +637,23 @@ class Pg4ContentScript {
       'a[data-action="execute-query"]',
       '.pg4-execute-button',
     ];
-    const matches = (el: Element | null): boolean => {
-      if (!el) return false;
-      return selectors.some((sel) => {
+    const getExecuteControl = (el: Element | null): HTMLElement | null => {
+      if (!el) return null;
+      for (const sel of selectors) {
         try {
-          return el.matches?.(sel) || !!el.closest?.(sel);
+          const match = el.matches?.(sel) ? el : el.closest?.(sel);
+          if (match instanceof HTMLElement) return match;
         } catch {
-          return false;
+          continue;
         }
-      });
+      }
+      return null;
     };
     this.executeClickInterceptor = (ev: Event) => {
       if (!this.settings.dangerInterceptEnabled) return;
       const target = ev.target as Element | null;
-      if (!matches(target)) return;
+      const executeControl = getExecuteControl(target);
+      if (!executeControl) return;
       const session = this.activeEditorId ? this.sessions.get(this.activeEditorId) : null;
       if (!session) return;
       const sql = session.state.sql;
@@ -648,27 +668,15 @@ class Pg4ContentScript {
       const dialog = new DangerDialog({
         sql,
         result: danger,
+        canExplain: canExplainStatement(sql),
         onConfirm: (mode) => {
           if (mode === "explain") {
-            // SPEC §9.3.3: route EXPLAIN <stmt> via pgAdmin4's existing query channel.
-            // We don't have direct access to pgAdmin4 internals; we insert EXPLAIN into the
-            // editor and let the user press execute themselves. This is a conservative
-            // implementation; the probe (Phase 0) will determine if we can invoke the channel
-            // directly.
-            const explain = `EXPLAIN ${sql.trim()}`;
-            this.sendToBridge({
-              type: "apply-completion",
-              editorId: session.editorId,
-              from: 0,
-              to: sql.length,
-              insert: explain,
-            });
+            this.executeExplain(session, sql, executeControl);
           } else {
             // Re-dispatch the click on the original target.
             // Use a slight delay so our dialog cleanup finishes first.
             setTimeout(() => {
-              const t = target as HTMLElement;
-              t.click();
+              executeControl.click();
             }, 0);
           }
         },
@@ -679,6 +687,55 @@ class Pg4ContentScript {
       void dialog;
     };
     document.addEventListener("click", this.executeClickInterceptor, /* capture */ true);
+  }
+
+  private executeExplain(session: EditorSession, sql: string, target: HTMLElement) {
+    const explain = `EXPLAIN ${sql.trim()}`;
+    this.cancelPendingExplain();
+    const timeoutId = window.setTimeout(() => {
+      this.pendingExplainExecution = null;
+      this.showDangerToast("Unable to prepare EXPLAIN. The original statement was not executed.");
+    }, 1_000);
+    this.pendingExplainExecution = {
+      editorId: session.editorId,
+      expectedSql: explain,
+      target,
+      timeoutId,
+    };
+    this.sendToBridge({
+      type: "apply-completion",
+      editorId: session.editorId,
+      from: 0,
+      to: sql.length,
+      insert: explain,
+    });
+  }
+
+  private executePendingExplain(editorId: string, sql: string) {
+    const pending = this.pendingExplainExecution;
+    if (!pending || pending.editorId !== editorId || pending.expectedSql !== sql) return;
+    this.pendingExplainExecution = null;
+    clearTimeout(pending.timeoutId);
+    if (!pending.target.isConnected) {
+      this.showDangerToast("Unable to run EXPLAIN because the execute control is no longer available.");
+      return;
+    }
+    pending.target.click();
+  }
+
+  private cancelPendingExplain() {
+    if (!this.pendingExplainExecution) return;
+    clearTimeout(this.pendingExplainExecution.timeoutId);
+    this.pendingExplainExecution = null;
+  }
+
+  private showDangerToast(message: string) {
+    const toast = document.createElement("div");
+    toast.textContent = message;
+    toast.style.cssText =
+      "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--pg4-bg);color:var(--pg4-fg);border:1px solid var(--pg4-border);border-radius:6px;padding:8px 12px;font-size:12px;font-family:var(--pg4-font);box-shadow:var(--pg4-shadow);z-index:2147483647;pointer-events:auto;";
+    getShadow().appendChild(toast);
+    setTimeout(() => toast.remove(), 4_000);
   }
 
   // --- Background communication ---------------------------------------------
@@ -807,6 +864,7 @@ class Pg4ContentScript {
       this.sessions.clear();
       this.worker?.terminate();
       this.worker = null;
+      this.cancelPendingExplain();
       this.hoverCard?.destroy();
     } catch {
       /* ignore */
@@ -935,6 +993,10 @@ function quickDetectDangerSync(sql: string): { detected: boolean; kind: string |
   }
   void upper;
   return { detected: !!kind, kind, reasons, targetObjects };
+}
+
+function canExplainStatement(sql: string): boolean {
+  return /^\s*(?:DELETE|UPDATE)\b/i.test(sql);
 }
 
 // ---------------------------------------------------------------------------

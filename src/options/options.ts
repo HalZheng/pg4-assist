@@ -3,6 +3,7 @@
 
 import { DEFAULT_SETTINGS, type Pg4Settings } from "../storage/chrome-storage";
 import type { SnapshotMeta, HostBinding, Snippet, QueryHistoryEntry, DdlWarning } from "../types/editor";
+import { MAX_DDL_IMPORT_BYTES } from "../lib/payload-limits";
 
 // ---- Helpers --------------------------------------------------------------
 
@@ -160,6 +161,10 @@ function setupSnapshotImport() {
       toast("Choose a DDL file first.", "err");
       return;
     }
+    if (file.size > MAX_DDL_IMPORT_BYTES) {
+      toast("DDL files must be 50 MB or smaller.", "err");
+      return;
+    }
     const displayName = nameInput.value.trim() || file.name.replace(/\.(sql|txt|ddl)$/i, "");
     if (!displayName) {
       toast("Provide a display name.", "err");
@@ -282,8 +287,8 @@ async function loadHosts() {
     const actions = el("td");
     const remove = el("button", "danger", "Remove");
     remove.addEventListener("click", async () => {
-      if (!confirm(`Remove host binding for ${h.origin}?`)) return;
-      await send({ type: "pg4:set-host-binding", origin: h.origin, snapshotId: null });
+      if (!confirm(`Remove authorized host ${h.origin}?`)) return;
+      await send({ type: "pg4:delete-host-binding", origin: h.origin });
       await loadHosts();
     });
     actions.appendChild(remove);

@@ -6,6 +6,7 @@ import type { SchemaGraph, ColumnNode, JsonbPathNode } from "../types/schema-gra
 import type { UsageStat, Snippet } from "../types/editor";
 import { SQL_KEYWORDS, BUILTIN_FUNCTIONS, normalizeType } from "./sql-reference";
 import { computeScore, sortItems, type ScoredCandidate } from "./completion-ranker";
+import { quoteIdentifier } from "./sql-identifiers";
 
 export interface CompletionEngineDeps {
   graph: SchemaGraph | null;
@@ -41,6 +42,9 @@ export function buildCandidates(ctx: CompletionContext, deps: CompletionEngineDe
       addSchemaCandidates(candidates, graph, ctx);
       addKeywordCandidates(candidates, ctx, ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "AS", "ON", "USING", "WHERE"]);
       break;
+    case "schema-relation":
+      addSchemaRelationCandidates(candidates, graph, ctx, deps);
+      break;
     case "schema":
       addSchemaCandidates(candidates, graph, ctx);
       break;
@@ -63,7 +67,7 @@ export function buildCandidates(ctx: CompletionContext, deps: CompletionEngineDe
       addColumnCandidates(candidates, ctx, true);
       break;
     case "keyword":
-      addKeywordCandidates(candidates, ctx, ["SELECT", "FROM", "WHERE", "JOIN", "INSERT INTO", "UPDATE", "DELETE FROM", "WITH", "UNION", "UNION ALL", "SELECT DISTINCT"]);
+      addKeywordCandidates(candidates, ctx, SQL_KEYWORDS.map((keyword) => keyword.label));
       break;
     case "cte-name":
       addKeywordCandidates(candidates, ctx, ["AS"]);
@@ -138,24 +142,9 @@ function matchesPrefix(label: string, prefix: string): boolean {
   return false;
 }
 
-/** Reserved-word set used to decide whether an unquoted identifier needs quoting. */
-const RESERVED_WORDS = new Set(SQL_KEYWORDS.map((k) => k.label.toUpperCase()));
-
-/**
- * Wrap an identifier in double quotes when PostgreSQL would require it:
- *   - the DDL declared it quoted (mixed case preserved), or
- *   - the name contains uppercase letters / whitespace / special chars, or
- *   - the name is a reserved keyword (e.g. a table literally named "order").
- * Internal double quotes are escaped by doubling, per SQL syntax.
- */
-function quoteIdentIfNeeded(name: string, quoted: boolean): string {
-  if (quoted) return `"${name.replace(/"/g, '""')}"`;
-  const needsQuote =
-    /[A-Z]/.test(name) ||
-    /[^a-z0-9_]/.test(name) ||
-    /^[0-9]/.test(name) ||
-    RESERVED_WORDS.has(name.toUpperCase());
-  return needsQuote ? `"${name.replace(/"/g, '""')}"` : name;
+/** Quote relation identifiers consistently so completions preserve exact DDL names. */
+function quoteIdentIfNeeded(name: string, _quoted: boolean): string {
+  return quoteIdentifier(name);
 }
 
 /** System / noise schemas whose tables pollute FROM candidates by default. */
@@ -179,16 +168,23 @@ function addRelationCandidates(out: ScoredCandidate[], graph: SchemaGraph | null
     for (const rel of Object.values(schema.relations)) {
       // De-noise: hide system schemas / EF migration tables unless explicitly enabled.
       if (!showSystem && isNoiseRelation(rel.schema, rel.name)) continue;
-      const label = rel.schema === "public" ? rel.name : `${rel.schema}.${rel.name}`;
-      if (!matchesPrefix(label, ctx.prefix) && !matchesPrefix(rel.name, ctx.prefix)) continue;
+      const qualifiedName = `${schema.name}.${rel.name}`;
+      const qualifiedIdentifier = `${quoteIdentIfNeeded(schema.name, schema.quoted)}.${quoteIdentIfNeeded(rel.name, rel.quoted)}`;
+      if (
+        !matchesPrefix(qualifiedIdentifier, ctx.prefix) &&
+        !matchesPrefix(qualifiedName, ctx.prefix) &&
+        !matchesPrefix(rel.name, ctx.prefix)
+      ) {
+        continue;
+      }
       const kind: CompletionItem["kind"] = rel.kind === "table" ? "table" : rel.kind === "view" ? "view" : "table";
       out.push({
         kind,
-        label: rel.name,
+        label: qualifiedIdentifier,
         detail: `${rel.schema}.${rel.name} (${rel.kind})`,
         documentation: rel.comment,
-        insertText: quoteIdentIfNeeded(rel.name, rel.quoted),
-        filterText: rel.name,
+        insertText: qualifiedIdentifier,
+        filterText: qualifiedName,
         score: 0,
         source: "schema",
         usageKey: rel.key,
@@ -204,12 +200,35 @@ function addSchemaCandidates(out: ScoredCandidate[], graph: SchemaGraph | null, 
     if (!matchesPrefix(schema.name, ctx.prefix)) continue;
     out.push({
       kind: "keyword",
-      label: schema.name,
+      label: quoteIdentifier(schema.name),
       detail: "schema",
-      insertText: schema.name,
+      insertText: quoteIdentifier(schema.name),
       filterText: schema.name,
       score: 0,
       source: "schema",
+    });
+  }
+}
+
+function addSchemaRelationCandidates(out: ScoredCandidate[], graph: SchemaGraph | null, ctx: CompletionContext, deps: CompletionEngineDeps): void {
+  if (!graph || !ctx.activeSchema) return;
+  const schema = Object.values(graph.schemas).find((candidate) => candidate.name.toLowerCase() === ctx.activeSchema!.toLowerCase());
+  if (!schema) return;
+  const showSystem = deps.showSystemTables ?? false;
+  for (const relation of Object.values(schema.relations)) {
+    if (!showSystem && isNoiseRelation(relation.schema, relation.name)) continue;
+    if (!matchesPrefix(relation.name, ctx.prefix)) continue;
+    out.push({
+      kind: relation.kind === "view" ? "view" : "table",
+      label: quoteIdentifier(relation.name),
+      detail: `${relation.schema}.${relation.name} (${relation.kind})`,
+      documentation: relation.comment,
+      insertText: quoteIdentifier(relation.name),
+      filterText: relation.name,
+      score: 0,
+      source: "schema",
+      usageKey: relation.key,
+      baseType: relation.kind,
     });
   }
 }
@@ -259,9 +278,11 @@ function addColumnsFromRelation(
   for (const c of rel.columns) {
     if (!matchesPrefix(c.name, prefix)) continue;
     // Qualify with alias only when the column is ambiguous across visible relations
-    // (multi-table) AND this relation has an alias. Bare column otherwise.
+    // (multi-table) AND this relation has an alias. Column identifiers are always
+    // quoted to preserve their exact PostgreSQL DDL spelling.
     const needsQualify = qualify && ambiguous?.has(c.key) && !!alias;
-    const insertText = needsQualify ? `${alias!}.${c.name}` : c.name;
+    const quotedColumn = quoteIdentifier(c.name);
+    const insertText = needsQualify ? `${alias!}.${quotedColumn}` : quotedColumn;
     out.push({
       kind: "column",
       label: c.name,

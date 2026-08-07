@@ -1048,7 +1048,6 @@
     maxCandidates: 50,
     completionShortcut: "Ctrl+Space",
     historyRetentionDays: 90,
-    showSystemTables: false,
     smartPasteHintDismissed: false
   };
   async function getSettings() {
@@ -1118,7 +1117,7 @@
           w = new Worker(URL.createObjectURL(blob), { type: "module" });
         }
         const client = new WorkerRpcClient(w);
-        void client.call("set-config", { maxCandidates: this.settings.maxCandidates, showSystemTables: this.settings.showSystemTables });
+        void client.call("set-config", { maxCandidates: this.settings.maxCandidates });
         return client;
       } catch (e) {
         console.warn("[pg4] worker creation failed:", e);
@@ -1180,7 +1179,7 @@
       }
       const editorDom = this.findEditorDomFor(editorId);
       const diagnostics = new DiagnosticsOverlay(editorDom);
-      const hover = this.hoverCard ?? new HoverCard();
+      const hover = new HoverCard();
       const session = {
         editorId,
         state: { editorId, sql: "", cursor: 0, selection: { from: 0, to: 0 } },
@@ -1220,13 +1219,6 @@
       s.scrollRect = scrollRect;
       this.activeEditorId = editorId;
       if (kind === "input" || kind === "paste") {
-        if (kind === "input") this.hoverCard?.hide();
-        if (s.menu) {
-          const ch = sql[cursor - 1];
-          if (ch && !/[A-Za-z0-9_]/.test(ch) && !isImmediateTriggerContext(sql, cursor)) {
-            this.closeMenu(s, "external");
-          }
-        }
         this.scheduleCompletion(s, kind);
       } else if (kind === "selection") {
         if (s.menu) {
@@ -1278,15 +1270,11 @@
     async requestCompletion(session, sql, cursor, force) {
       if (!this.worker) return;
       if (this.settings.completionTriggerMode === "manual" && !force) {
-        if (session.menu) this.closeMenu(session, "external");
         return;
       }
       if (!force) {
         const prefix = currentPrefix(sql, cursor);
-        if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor)) {
-          if (session.menu) this.closeMenu(session, "external");
-          return;
-        }
+        if (prefix.length < 2 && !isImmediateTriggerContext(sql, cursor)) return;
       }
       const reqId = newRequestId();
       session.lastReqId = reqId;
@@ -1565,7 +1553,7 @@
         this.settings = DEFAULT_SETTINGS;
       }
       if (this.worker) {
-        void this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates, showSystemTables: this.settings.showSystemTables });
+        void this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates });
       }
     }
     async reloadSnippets() {
@@ -1607,7 +1595,7 @@
     async syncWorkerState() {
       if (!this.worker) return;
       await this.worker.call("set-active-graph", { graph: this.activeGraph });
-      await this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates, showSystemTables: this.settings.showSystemTables });
+      await this.worker.call("set-config", { maxCandidates: this.settings.maxCandidates });
     }
     // --- Forced completion shortcut ------------------------------------------
     onForceShortcut = (ev) => {

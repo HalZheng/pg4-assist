@@ -4,6 +4,7 @@
 
 import type { SchemaGraph } from "../types/schema-graph";
 import type { SnapshotMeta, HostBinding, UsageStat, QueryHistoryEntry, Snippet, DdlWarning } from "../types/editor";
+import { getUtf8ByteLength } from "../lib/payload-limits";
 
 const DB_NAME = "pg4-smart-assist";
 const DB_VERSION = 1;
@@ -202,6 +203,10 @@ export async function setHostBinding(origin: string, snapshotId: string | null):
   await tx(STORES.hostBindings, "readwrite", (s) => s.put(binding));
 }
 
+export async function deleteHostBinding(origin: string): Promise<void> {
+  await tx(STORES.hostBindings, "readwrite", (s) => s.delete(origin));
+}
+
 export async function getHostBinding(origin: string): Promise<HostBinding | null> {
   const row = (await tx(STORES.hostBindings, "readonly", (s) => s.get(origin))) as HostBinding | undefined;
   return row ?? null;
@@ -361,7 +366,7 @@ export async function estimateStorage(): Promise<{ usage: number; quota: number 
 
 export async function getAllSnapshotRawSizes(): Promise<number> {
   const all = (await tx(STORES.snapshots, "readonly", (s) => s.getAll())) as StoredSnapshot[];
-  return all.reduce((sum, s) => sum + s.rawDdl.length, 0);
+  return all.reduce((sum, s) => sum + getUtf8ByteLength(s.rawDdl), 0);
 }
 
 export async function exportAllData(): Promise<{
