@@ -7,6 +7,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,3 +41,31 @@ jobs:
           name: pg4-smart-assist-dist
           path: dist/
           if-no-files-found: error
+
+  # 每次 push 到 main 且构建成功后，自动创建/更新一个固定 tag 的“最新版”Release
+  release:
+    name: Publish auto Release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pg4-smart-assist-dist
+          path: dist/
+
+      - name: Package extension zip
+        run: (cd dist && zip -r ../pg4-smart-assist.zip .)
+
+      - name: Create or update auto Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete auto-build --yes --cleanup-tag 2>/dev/null || true
+          gh release create auto-build pg4-smart-assist.zip \
+            --title "PG4 Smart Assist (auto)" \
+            --notes "自动构建产物（push 到 main 时生成） · 提交 ${{ github.sha }}" \
+            --latest
