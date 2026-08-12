@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>PG4 Snippet Smoke Test</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { font-family: system-ui, sans-serif; display: flex; flex-direction: column; padding: 16px; background: #1e1e1e; color: #ddd; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+    .toolbar button { padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    #editor { flex: 1; border: 1px solid #444; overflow: auto; }
+    .note { font-size: 11px; color: #888; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>PG4 Snippet Smoke Playground</h1>
+  <div class="toolbar">
+    <button id="run-snippet">Run pg4-snippet.js</button>
+    <button id="load-ddl">Load sample DDL</button>
+  </div>
+  <div id="editor"></div>
+  <div class="note">
+    本地最小 CM6 playground，用于脱离 pgAdmin 验证 snippet。
+    点击 "Run pg4-snippet.js" 会 fetch 同目录下的 pg4-snippet.js 并 eval 注入。
+    pgAdmin webpack 路径无法在此模拟，仅 el.cmView 路径可用。
+  </div>
+
+  <script type="module">
+    import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.65.7";
+    import { sql } from "https://esm.sh/@codemirror/lang-sql@6.8.0";
+
+    const view = new EditorView({
+      doc: "SELECT * FROM users WHERE id = 1;\n",
+      extensions: [basicSetup, sql()],
+      parent: document.getElementById("editor"),
+    });
+    window.__cmView = view;
+
+    document.getElementById("run-snippet").onclick = async () => {
+      try {
+        const res = await fetch("./pg4-snippet.js");
+        const code = await res.text();
+        // 在全局作用域 eval（snippet 顶层 IIFE 自执行，无 export）
+        (0, eval)(code);
+        console.log("[smoke] snippet eval done");
+      } catch (e) {
+        console.error("[smoke] failed to load snippet:", e);
+      }
+    };
+
+    document.getElementById("load-ddl").onclick = () => {
+      const ddl = `CREATE TABLE public.users (
+  id integer PRIMARY KEY,
+  name text NOT NULL,
+  email text UNIQUE,
+  created_at timestamp DEFAULT now()
+);
+CREATE TABLE public.orders (
+  id integer PRIMARY KEY,
+  user_id integer REFERENCES public.users(id),
+  amount numeric(10,2),
+  data jsonb
+);
+-- @pg4-jsonb public.orders.data customer.name:string "客户名"
+-- @pg4-jsonb public.orders.data customer.age:integer "客户年龄"
+`;
+      const doc = view.state.doc.toString() + "\n-- DDL sample loaded\n-- paste DDL into snippet drawer to import\n";
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ddl } });
+    };
+  </script>
+</body>
+</html>
