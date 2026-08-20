@@ -10,19 +10,22 @@
     .toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
     .toolbar button { padding: 4px 10px; font-size: 12px; cursor: pointer; }
     #editor { flex: 1; border: 1px solid #444; overflow: auto; }
-    .note { font-size: 11px; color: #888; margin-top: 8px; }
+    .note { font-size: 11px; color: #888; margin-top: 8px; white-space: pre-line; }
+    #e2e-status { font-size: 12px; margin-top: 6px; color: #8c8; min-height: 16px; }
   </style>
 </head>
 <body>
   <h1>PG4 Snippet Smoke Playground</h1>
   <div class="toolbar">
-    <button id="run-snippet">Run pg4-snippet.js</button>
-    <button id="load-ddl">Load sample DDL</button>
+    <button id="run-snippet">1. Run pg4-snippet.js</button>
+    <button id="auto-e2e">2. Auto E2E（run + import + verify）</button>
   </div>
+  <div id="e2e-status"></div>
   <div id="editor"></div>
   <div class="note">
-    本地最小 CM6 playground，用于脱离 pgAdmin 验证 snippet。
-    点击 "Run pg4-snippet.js" 会 fetch 同目录下的 pg4-snippet.js 并 eval 注入。
+    本地最小 CM6 playground，用于脱离 pgAdmin 验证 snippet。需通过本地 HTTP 服务打开（如 `npx serve .`），file:// 下 fetch 会被 CORS 拦截。
+    "Auto E2E" 会依次验证：snippet 启动 → Worker（或降级）→ 编辑器接管（el.cmView 路径）→ 导入样例 DDL → 激活快照 → 补全候选非空。
+    成功后在编辑器输入 `SELECT * FROM us` 触发补全，或输入 `SELECT o.` 查看 qualified-column 候选；hover 列名查看文档卡。
     pgAdmin webpack 路径无法在此模拟，仅 el.cmView 路径可用。
   </div>
 
@@ -30,27 +33,8 @@
     import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.65.7";
     import { sql } from "https://esm.sh/@codemirror/lang-sql@6.8.0";
 
-    const view = new EditorView({
-      doc: "SELECT * FROM users WHERE id = 1;\n",
-      extensions: [basicSetup, sql()],
-      parent: document.getElementById("editor"),
-    });
-    window.__cmView = view;
-
-    document.getElementById("run-snippet").onclick = async () => {
-      try {
-        const res = await fetch("./pg4-snippet.js");
-        const code = await res.text();
-        // 在全局作用域 eval（snippet 顶层 IIFE 自执行，无 export）
-        (0, eval)(code);
-        console.log("[smoke] snippet eval done");
-      } catch (e) {
-        console.error("[smoke] failed to load snippet:", e);
-      }
-    };
-
-    document.getElementById("load-ddl").onclick = () => {
-      const ddl = `CREATE TABLE public.users (
+    const SAMPLE_DDL = `CREATE SCHEMA analytics;
+CREATE TABLE public.users (
   id integer PRIMARY KEY,
   name text NOT NULL,
   email text UNIQUE,
@@ -62,11 +46,70 @@ CREATE TABLE public.orders (
   amount numeric(10,2),
   data jsonb
 );
+CREATE INDEX idx_orders_user ON public.orders (user_id);
+COMMENT ON TABLE public.orders IS '订单表';
+COMMENT ON COLUMN public.orders.amount IS '订单金额';
 -- @pg4-jsonb public.orders.data customer.name:string "客户名"
 -- @pg4-jsonb public.orders.data customer.age:integer "客户年龄"
 `;
-      const doc = view.state.doc.toString() + "\n-- DDL sample loaded\n-- paste DDL into snippet drawer to import\n";
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ddl } });
+
+    const view = new EditorView({
+      doc: "SELECT * FROM users WHERE id = 1;\n",
+      extensions: [basicSetup, sql()],
+      parent: document.getElementById("editor"),
+    });
+    window.__cmView = view;
+
+    const status = (msg, ok = true) => {
+      const el = document.getElementById("e2e-status");
+      el.textContent = msg;
+      el.style.color = ok ? "#8c8" : "#c88";
+    };
+
+    async function runSnippet() {
+      const res = await fetch("./pg4-snippet.js");
+      const code = await res.text();
+      // 在全局作用域 eval（snippet 顶层 IIFE 自执行，无 export）
+      (0, eval)(code);
+    }
+
+    document.getElementById("run-snippet").onclick = async () => {
+      try {
+        await runSnippet();
+        status("snippet 已运行，详见控制台 [pg4] 日志；右下角应出现齿轮按钮");
+      } catch (e) {
+        status("[smoke] failed to load snippet: " + e.message, false);
+        console.error("[smoke] failed to load snippet:", e);
+      }
+    };
+
+    document.getElementById("auto-e2e").onclick = async () => {
+      try {
+        // 1. run (idempotent — re-run on an already-active page is a no-op)
+        await runSnippet();
+        await new Promise(r => setTimeout(r, 200));
+        const p = window.__pg4;
+        if (!p) throw new Error("window.__pg4 未导出");
+        status("✓ snippet 启动（worker: " + (p.state.worker ? "active" : "main-thread fallback") + "）");
+
+        // 2. editor adopted?
+        if (!p.state.editors.size) throw new Error("编辑器未被接管（el.cmView 路径失败）");
+        status("✓ 编辑器已接管 ×" + p.state.editors.size);
+
+        // 3. import sample DDL via the real pipeline
+        const { meta, warnings } = await p.importSnapshotFromText(SAMPLE_DDL, "smoke-sample", "sample.sql");
+        status(`✓ 快照导入：${meta.schemaCount} schemas, ${meta.relationCount} relations, ${warnings.length} warnings`);
+
+        // 4. completion candidates non-empty
+        const sql = "SELECT * FROM us";
+        const ctx = p.buildCompletionContext(sql, sql.length, p.state.activeGraph);
+        const items = p.generateCandidates(ctx, p.state.activeGraph, new Map());
+        if (!items.some(i => i.label === "users")) throw new Error("补全候选缺少 users: " + JSON.stringify(items.map(i => i.label)));
+        status(`✓ E2E 全部通过 — editor ×${p.state.editors.size}, snapshot "${meta.displayName}", candidates ${items.length}+`);
+      } catch (e) {
+        status("✗ E2E 失败: " + e.message, false);
+        console.error("[smoke] E2E failed:", e);
+      }
     };
   </script>
 </body>

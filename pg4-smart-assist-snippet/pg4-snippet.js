@@ -199,6 +199,25 @@
     pruneHistory().catch(() => {});
   }
   async function pruneHistory() {
+    // 1) Retention by age: drop entries older than CONFIG.historyRetentionDays
+    if (CONFIG.historyRetentionDays > 0) {
+      const cutoff = Date.now() - CONFIG.historyRetentionDays * 24 * 3600 * 1000;
+      await new Promise(resolve => {
+        openDb().then(db => {
+          const t = db.transaction(STORES.queryHistory, "readwrite");
+          const idx = t.objectStore(STORES.queryHistory).index("executedAt");
+          const range = IDBKeyRange.upperBound(cutoff);
+          const req = idx.openCursor(range);
+          req.onsuccess = () => {
+            const cursor = req.result;
+            if (!cursor) { resolve(); return; }
+            cursor.delete(); cursor.continue();
+          };
+          req.onerror = () => resolve();
+        }).catch(() => resolve());
+      });
+    }
+    // 2) Cap by row count (oldest first)
     const count = await tx(STORES.queryHistory, "readonly", s => s.count());
     if (count <= MAX_HISTORY_ROWS) return;
     await new Promise(resolve => {
@@ -423,7 +442,10 @@
     let cur = [];
     let depth = 0;
     for (const t of tokens) {
-      if (t.type === "eof") { if (cur.length) out.push(cur); break; }
+      if (t.type === "eof") {
+        if (cur.length) { out.push(cur); cur = []; }
+        break;
+      }
       if (t.type === "punctuation" && t.text === "(") depth++;
       else if (t.type === "punctuation" && t.text === ")") depth = Math.max(0, depth - 1);
       if (t.type === "punctuation" && t.text === ";" && depth === 0) {
@@ -546,8 +568,10 @@
       case "FOREIGN": parseCreateForeignTable(sig, i, graph, ensureSchema); break;
       case "FUNCTION":
       case "PROCEDURE": parseCreateFunction(sig, i, graph, ensureSchema, kind); break;
-      case "INDEX": /* parseCreateIndex - optional */ break;
-      case "UNIQUE": if (sig[i]?.text.toUpperCase() === "INDEX") i++; /* parseCreateIndex */ break;
+      case "INDEX": parseCreateIndex(sig, i, graph, ensureSchema, warnings, false); break;
+      case "UNIQUE":
+        if (sig[i]?.text.toUpperCase() === "INDEX") parseCreateIndex(sig, i + 1, graph, ensureSchema, warnings, true);
+        break;
       default: break; // other CREATE kinds ignored
     }
   }
@@ -618,12 +642,22 @@
     const name = nameTok.value ?? nameTok.text;
     const quoted = nameTok.type === "quoted-identifier";
     i++;
-    // Read type tokens until ',' or ')' or constraint keyword
+    // Read type tokens until top-level ',' / ')' or a constraint keyword.
+    // Paren depth is tracked so `numeric(10,2)` / `varchar(255)` stay intact.
     const typeParts = [];
+    let parenDepth = 0;
     while (i < sig.length) {
       const t = sig[i];
-      if (t.type === "punctuation" && (t.text === "," || t.text === ")")) break;
-      if (t.type === "keyword" && ["NOT","NULL","DEFAULT","PRIMARY","UNIQUE","REFERENCES","CHECK","GENERATED","COLLATE","CONSTRAINT"].includes(t.text.toUpperCase())) break;
+      if (t.type === "punctuation") {
+        if (t.text === "(") { parenDepth++; typeParts.push(t.text); i++; continue; }
+        if (t.text === ")") {
+          if (parenDepth === 0) break; // end of column list
+          parenDepth--;
+          typeParts.push(t.text); i++; continue;
+        }
+        if (t.text === "," && parenDepth === 0) break; // next column
+      }
+      if (parenDepth === 0 && t.type === "keyword" && ["NOT","NULL","DEFAULT","PRIMARY","UNIQUE","REFERENCES","CHECK","GENERATED","COLLATE","CONSTRAINT"].includes(t.text.toUpperCase())) break;
       typeParts.push(t.text);
       i++;
     }
@@ -904,6 +938,56 @@
     graph.functions.push(func);
   }
 
+  // CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON [schema.]table [USING method] (cols)
+  function parseCreateIndex(sig, i, graph, ensureSchema, warnings, unique) {
+    if (sig[i]?.text.toUpperCase() === "CONCURRENTLY") i++;
+    if (sig[i]?.text.toUpperCase() === "IF" &&
+        sig[i + 1]?.text.toUpperCase() === "NOT" &&
+        sig[i + 2]?.text.toUpperCase() === "EXISTS") i += 3;
+    // optional index name
+    let indexName = null;
+    if (sig[i]?.type === "identifier" || sig[i]?.type === "quoted-identifier") {
+      indexName = sig[i].value ?? sig[i].text;
+      i++;
+    }
+    if (sig[i]?.text.toUpperCase() !== "ON") return;
+    i++;
+    const qn = readQualifiedName(sig, i);
+    if (!qn?.name) return;
+    i = qn.next;
+    if (sig[i]?.text.toUpperCase() === "USING") i += 2; // USING method
+    const cols = [];
+    if (sig[i]?.text === "(") {
+      i++;
+      let depth = 1;
+      while (i < sig.length && depth > 0) {
+        const t = sig[i];
+        if (t.text === "(") depth++;
+        else if (t.text === ")") { depth--; if (depth === 0) break; }
+        else if (t.type === "identifier" || t.type === "quoted-identifier") {
+          cols.push(foldKey(t.value ?? t.text, t.type === "quoted-identifier"));
+        }
+        i++;
+      }
+    }
+    const isPartial = sig.slice(i).some(t => t.type === "keyword" && t.text.toUpperCase() === "WHERE");
+    const schemaName = qn.schema || "public";
+    const schemaKey = foldKey(schemaName, qn.schemaQuoted || false);
+    const relKey = `${schemaKey}.${foldKey(qn.name, qn.nameQuoted)}`;
+    const schema = ensureSchema(schemaName, qn.schemaQuoted || false);
+    const rel = schema.relations[relKey];
+    if (!rel) {
+      warnings.push({
+        line: sig[0].line,
+        code: "INDEX_TARGET_MISSING",
+        message: `CREATE INDEX on unknown table ${schemaName}.${qn.name}`,
+        summary: sig.slice(0, 5).map(t => t.text).join(" "),
+      });
+      return;
+    }
+    rel.indexes.push({ name: indexName ?? `__index_${rel.indexes.length}`, columns: cols, unique: !!unique, partial: isPartial });
+  }
+
   function parseAlter(sig, graph, ensureSchema, warnings) {
     let i = 1;
     if (sig[i]?.text.toUpperCase() === "TABLE") {
@@ -941,15 +1025,37 @@
     }
   }
 
+  // Read a dotted identifier chain (up to maxParts), e.g. schema.table.column.
+  function readDottedChain(sig, i, maxParts = 3) {
+    const parts = [];
+    while (parts.length < maxParts) {
+      const t = sig[i];
+      if (t?.type === "identifier") { parts.push({ name: t.value, quoted: false }); i++; }
+      else if (t?.type === "quoted-identifier") { parts.push({ name: t.value, quoted: true }); i++; }
+      else if (t?.type === "keyword" && parts.length === 0) { parts.push({ name: t.text, quoted: false }); i++; } // allow keyword as leading identifier
+      else break;
+      if (sig[i]?.type === "punctuation" && sig[i].text === ".") { i++; continue; }
+      break;
+    }
+    return { parts, next: i };
+  }
+
   function parseComment(sig, graph, ensureSchema) {
     let i = 1;
     if (sig[i]?.text.toUpperCase() !== "ON") return;
     i++;
-    const kindTok = sig[i++];
-    const kind = kindTok?.text.toUpperCase();
-    const qn = readQualifiedName(sig, i);
-    if (!qn?.name) return;
-    i = qn.next;
+    // Object kind: TABLE | VIEW | MATERIALIZED VIEW | COLUMN | ...
+    let kind = sig[i]?.text.toUpperCase();
+    i++;
+    if (kind === "MATERIALIZED" && sig[i]?.text.toUpperCase() === "VIEW") {
+      kind = "MATERIALIZED VIEW";
+      i++;
+    }
+    // Dotted chain: schema.table.column for COLUMN, schema.name otherwise
+    const chain = readDottedChain(sig, i, kind === "COLUMN" ? 3 : 2);
+    const parts = chain.parts;
+    if (!parts.length) return;
+    i = chain.next;
     // Find IS 'text'
     let comment = null;
     while (i < sig.length) {
@@ -962,22 +1068,37 @@
       i++;
     }
     if (comment == null) return;
-    const schemaName = qn.schema || "public";
-    const schemaKey = foldKey(schemaName, qn.schemaQuoted || false);
-    const schema = graph.schemas[schemaKey];
-    if (!schema) return;
-    if (kind === "TABLE" || kind === "VIEW" || kind === "MATERIALIZED") {
-      const relKey = `${schemaKey}.${foldKey(qn.name, qn.nameQuoted)}`;
+
+    if (kind === "COLUMN") {
+      let schemaPart, tablePart, colPart;
+      if (parts.length >= 3) {
+        [schemaPart, tablePart, colPart] = parts;
+      } else if (parts.length === 2) {
+        schemaPart = { name: "public", quoted: false };
+        [tablePart, colPart] = parts;
+      } else {
+        return;
+      }
+      const schemaKey = foldKey(schemaPart.name, schemaPart.quoted);
+      const schema = graph.schemas[schemaKey];
+      if (!schema) return;
+      const relKey = `${schemaKey}.${foldKey(tablePart.name, tablePart.quoted)}`;
+      const rel = schema.relations[relKey];
+      if (!rel) return;
+      const colKey = foldKey(colPart.name, colPart.quoted);
+      const col = rel.columns.find(c => c.key === colKey);
+      if (col) col.comment = comment;
+      return;
+    }
+
+    if (kind === "TABLE" || kind === "VIEW" || kind === "MATERIALIZED VIEW") {
+      const schemaPart = parts.length >= 2 ? parts[0] : { name: "public", quoted: false };
+      const namePart = parts.length >= 2 ? parts[1] : parts[0];
+      const schemaKey = foldKey(schemaPart.name, schemaPart.quoted);
+      const schema = graph.schemas[schemaKey];
+      if (!schema) return;
+      const relKey = `${schemaKey}.${foldKey(namePart.name, namePart.quoted)}`;
       if (schema.relations[relKey]) schema.relations[relKey].comment = comment;
-    } else if (kind === "COLUMN") {
-      // qn.name might be "table.column" — re-parse
-      // We read schema.table.column as schema+name, where name="table.column"
-      // Actually readQualifiedName reads only one segment after schema. Need to handle column.
-      // Re-scan: full name could be a.b.c
-      // Workaround: re-read from original position
-      // (Simpler: assume qn.schema=schema, qn.name contains "table.column" only if there was a dot)
-      // We'll skip sophisticated column comment parsing here.
-      // TODO: re-parse as three-part name
     }
   }
 
@@ -998,6 +1119,18 @@
   }
 
   // --- JSONB annotation parser ---
+  // Two path notations supported:
+  //   1. dotted: customer.name / items[].price  ([] marks an array segment)
+  //   2. JSON Pointer: /customer/name  (~1 = "/", ~0 = "~")
+  function parseJsonbPathSegments(pathStr) {
+    if (pathStr.startsWith("/")) {
+      return pathStr.split("/").slice(1)
+        .map(p => p.replace(/~1/g, "/").replace(/~0/g, "~"))
+        .filter(s => s !== "" && s !== "-");
+    }
+    return pathStr.split(".").filter(Boolean);
+  }
+
   function parseJsonbAnnotations(rawDdl, graph) {
     // Pattern: -- @pg4-jsonb schema.table.column path:type "comment"
     const re = /--\s*@pg4-jsonb\s+([^\s]+)\s+([^\s]+)(?:\s+"([^"]*)")?/g;
@@ -1016,20 +1149,17 @@
       const rel = schema?.relations[relKey];
       const col = rel?.columns.find(c => c.key === colKey);
       if (!col) continue;
-      // Parse pathSpec: "customer.name:string" or "items[].price:number"
+      // pathSpec: "customer.name:string" or "items[].price:number" or "/a/b:type"
       const lastColon = pathSpec.lastIndexOf(":");
       const pathStr = lastColon >= 0 ? pathSpec.slice(0, lastColon) : pathSpec;
       const valueType = lastColon >= 0 ? pathSpec.slice(lastColon + 1) : undefined;
-      const segRaw = pathStr.split(".");
-      const segs = [];
-      let isArray = false;
-      for (const s of segRaw) {
-        if (s.endsWith("[]")) { segs.push(s.slice(0, -2)); isArray = true; }
-        else segs.push(s);
-      }
+      const segs = parseJsonbPathSegments(pathStr);
+      if (!segs.length) continue;
+      const isArray = segs.some(s => s.endsWith("[]"));
+      const cleanSegs = segs.map(s => s.endsWith("[]") ? s.slice(0, -2) : s);
       const node = {
-        segments: segs,
-        displayPath: segs.join("."),
+        segments: cleanSegs,
+        displayPath: cleanSegs.join("."),
         isArray, valueType, comment,
         children: [],
       };
@@ -1630,39 +1760,57 @@
   function runDiagnostics(sql, graph) {
     const diags = [];
     try {
+      if (!sql || !sql.trim()) return diags;
       const tokens = tokenize(sql);
       const sig = significantTokens(tokens);
       const stmts = splitStatements(sig);
+      // Red: whole-document paren balance + unterminated strings/identifiers
+      checkParenBalance(tokens, diags);
+      checkUnclosedStrings(tokens, diags);
+      // Per-statement: clause order, alias.column existence, INSERT arity, type mismatch
       for (const stmt of stmts) {
-        diags.push(...diagnoseStatement(stmt, sql, graph));
+        if (!stmt.length) continue;
+        checkStatementDiagnostics(stmt, diags, graph);
       }
     } catch (e) {
       // tolerant: log and continue
       warn("diagnostics error:", e?.message || e);
     }
-    return diags;
+    return dedupeDiagnostics(diags);
   }
 
-  function diagnoseStatement(stmt, sql, graph) {
-    const diags = [];
-    if (!stmt.length) return diags;
-    const start = stmt[0].start;
-    const endTok = stmt[stmt.length - 1];
-    const end = endTok.end;
-
-    // 1. Check balanced parentheses
+  // Red: balanced parentheses across the whole document.
+  function checkParenBalance(tokens, diags) {
     let depth = 0;
-    let minUnbalancedPos = -1;
-    for (const t of stmt) {
-      if (t.type === "punctuation" && t.text === "(") { depth++; }
-      else if (t.type === "punctuation" && t.text === ")") { depth--; if (depth < 0 && minUnbalancedPos < 0) minUnbalancedPos = t.start; }
+    for (const t of tokens) {
+      if (t.type === "eof") break;
+      if (t.type === "punctuation" && t.text === "(") depth++;
+      else if (t.type === "punctuation" && t.text === ")") {
+        depth--;
+        if (depth < 0) {
+          diags.push({ severity: "error", from: t.start, to: t.end, message: "Unexpected closing parenthesis" });
+          depth = 0;
+        }
+      }
     }
-    if (depth !== 0) {
-      diags.push({ severity: "error", from: start, to: end, message: depth > 0 ? "Unbalanced parenthesis: missing ')'" : "Unbalanced parenthesis: extra ')'" });
+    if (depth > 0) {
+      // find last unclosed (
+      let lastOpen = null;
+      let d = 0;
+      for (const t of tokens) {
+        if (t.type === "eof") break;
+        if (t.type === "punctuation" && t.text === "(") { d++; lastOpen = t; }
+        else if (t.type === "punctuation" && t.text === ")") d--;
+      }
+      const from = lastOpen ? lastOpen.start : 0;
+      diags.push({ severity: "error", from, to: from + 1, message: `Unclosed parenthesis (${depth} open)` });
     }
+  }
 
-    // 2. Check unterminated strings
-    for (const t of stmt) {
+  // Red: unterminated string literals / quoted identifiers.
+  function checkUnclosedStrings(tokens, diags) {
+    for (const t of tokens) {
+      if (t.type === "eof") break;
       if (t.type === "string" && !t.text.endsWith("'")) {
         diags.push({ severity: "error", from: t.start, to: t.end, message: "Unterminated string literal" });
       }
@@ -1670,18 +1818,29 @@
         diags.push({ severity: "error", from: t.start, to: t.end, message: "Unterminated quoted identifier" });
       }
     }
+  }
 
-    // 3. Check clause ordering: SELECT ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY ... LIMIT
+  function checkStatementDiagnostics(stmt, diags, graph) {
+    checkClauseOrder(stmt, diags);
+    const head = stmt[0]?.text?.toUpperCase?.() ?? "";
+    if (head === "INSERT") checkInsertArity(stmt, diags, graph);
+    if (head === "SELECT" || head === "UPDATE" || head === "DELETE") checkComparisonTypes(stmt, diags, graph);
+    checkAliasColumns(stmt, diags, graph);
+  }
+
+  // Red: clause ordering SELECT..FROM..WHERE..GROUP BY..HAVING..ORDER BY..LIMIT/OFFSET
+  function checkClauseOrder(stmt, diags) {
     const clauseOrder = ["SELECT", "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET"];
     let lastIdx = -1;
-    for (const t of stmt) {
+    for (let i = 0; i < stmt.length; i++) {
+      const t = stmt[i];
       if (t.type !== "keyword") continue;
       const up = t.text.toUpperCase();
       const idx = clauseOrder.indexOf(up);
       if (idx < 0) continue;
       // GROUP / ORDER must be followed by BY
       if (up === "GROUP" || up === "ORDER") {
-        const next = stmt[stmt.indexOf(t) + 1];
+        const next = stmt[i + 1];
         if (next?.text.toUpperCase() !== "BY") continue;
       }
       if (idx < lastIdx) {
@@ -1690,68 +1849,245 @@
         lastIdx = idx;
       }
     }
+  }
 
-    // 4. Yellow: alias.column where alias is not in scope
-    // (simplified: check qualified references)
+  // Yellow: alias.column where the column does not exist on the relation,
+  // or the qualifier itself is unknown (not a schema/alias/relation in scope).
+  function checkAliasColumns(stmt, diags, graph) {
     const rm = buildRelationMap(stmt, graph);
     for (let i = 0; i < stmt.length; i++) {
       const t = stmt[i];
-      if (t.type === "punctuation" && t.text === ".") {
-        const identTok = stmt[i - 1];
-        const nextTok = stmt[i + 1];
-        if (identTok && nextTok && (identTok.type === "identifier" || identTok.type === "quoted-identifier")) {
-          const key = foldKey(identTok.value ?? identTok.text, identTok.type === "quoted-identifier");
-          // is it a schema? is it an alias?
-          if (!graph?._index?.schemas?.[key] && !rm.byAlias.has(key) && !rm.byName.has(key)) {
-            // could be a table.column reference where table wasn't in FROM — flag as warning
-            // But only if the next token is an identifier (i.e., .column)
-            if (nextTok.type === "identifier" || nextTok.type === "quoted-identifier") {
-              diags.push({ severity: "warning", from: identTok.start, to: nextTok.end, message: `Unknown qualifier "${identTok.value ?? identTok.text}"` });
-            }
-          }
-        }
+      if (t.type !== "punctuation" || t.text !== ".") continue;
+      const aliasTok = stmt[i - 1];
+      const colTok = stmt[i + 1];
+      if (!aliasTok || !colTok) continue;
+      if (aliasTok.type !== "identifier" && aliasTok.type !== "quoted-identifier") continue;
+      if (colTok.type !== "identifier" && colTok.type !== "quoted-identifier") continue;
+      const aliasKey = foldKey(aliasTok.value ?? aliasTok.text, aliasTok.type === "quoted-identifier");
+      if (graph?._index?.schemas?.[aliasKey]) continue; // schema qualifier — ok
+      const ref = rm.byAlias.get(aliasKey) ?? rm.byName.get(aliasKey);
+      if (!ref) {
+        diags.push({
+          severity: "warning", from: aliasTok.start, to: colTok.end,
+          message: `Unknown qualifier "${aliasTok.value ?? aliasTok.text}"`,
+        });
+        continue;
+      }
+      if (!ref.columns?.length) continue; // CTE / unknown projection — cannot verify
+      const colKey = foldKey(colTok.value ?? colTok.text, colTok.type === "quoted-identifier");
+      if (!ref.columns.some(c => c.key === colKey)) {
+        diags.push({
+          severity: "warning", from: aliasTok.start, to: colTok.end,
+          message: `Column "${aliasTok.text}.${colTok.text}" does not exist on ${ref.schema ? ref.schema + "." : ""}${ref.name}`,
+        });
       }
     }
+  }
 
-    return diags;
+  // Yellow: INSERT column count vs VALUES arity mismatch + unknown columns.
+  function checkInsertArity(stmt, diags, graph) {
+    if (!graph?._index) return;
+    const upAt = i => (i >= 0 && i < stmt.length ? stmt[i].text.toUpperCase() : "");
+    if (upAt(0) !== "INSERT" || upAt(1) !== "INTO") return;
+    let i = 2;
+    let schemaName = "public";
+    let tableName = null;
+    const t0 = stmt[i];
+    if (!t0) return;
+    if (stmt[i + 1]?.text === "." && stmt[i + 2]) {
+      schemaName = t0.value ?? t0.text;
+      tableName = stmt[i + 2].value ?? stmt[i + 2].text;
+      i += 3;
+    } else {
+      tableName = t0.value ?? t0.text;
+      i += 1;
+    }
+    // optional column list
+    let cols = [];
+    if (stmt[i]?.text === "(") {
+      const closeIdx = findMatchingParenIdx(stmt, i);
+      if (closeIdx < 0) return;
+      cols = splitTopLevelCommasTokens(stmt.slice(i + 1, closeIdx))
+        .map(p => p.map(t => t.text).join("").trim())
+        .filter(Boolean);
+      i = closeIdx + 1;
+    }
+    if (!cols.length) return;
+    // find VALUES ( ... )
+    while (i < stmt.length && upAt(i) !== "VALUES") i++;
+    if (upAt(i) !== "VALUES") return;
+    i++;
+    if (stmt[i]?.text !== "(") return;
+    const closeIdx = findMatchingParenIdx(stmt, i);
+    if (closeIdx < 0) return;
+    const valuesCount = splitTopLevelCommasTokens(stmt.slice(i + 1, closeIdx)).filter(p => p.length > 0).length;
+    if (cols.length !== valuesCount) {
+      diags.push({
+        severity: "warning", from: stmt[i].start, to: stmt[closeIdx].end,
+        message: `Column count (${cols.length}) does not match VALUES count (${valuesCount})`,
+      });
+    }
+    // unknown columns on target table
+    const relKey = `${foldKey(schemaName, false)}.${foldKey(tableName, false)}`;
+    const rel = graph._index.relationByName[relKey];
+    if (!rel) return;
+    for (const c of cols) {
+      const colKey = foldKey(c.replace(/^["']|["']$/g, ""), false);
+      if (!rel.columns.some(col => col.key === colKey)) {
+        diags.push({
+          severity: "warning", from: stmt[0].start, to: stmt[0].end,
+          message: `Column "${c}" does not exist on ${schemaName}.${tableName}`,
+        });
+      }
+    }
+  }
+
+  // Yellow: obvious numeric-vs-text comparison mismatch (conservative).
+  function checkComparisonTypes(stmt, diags, graph) {
+    if (!graph?._index) return;
+    const OPS = new Set(["=", "!=", "<>", "<", ">", "<=", ">="]);
+    const rm = buildRelationMap(stmt, graph);
+    for (let i = 0; i < stmt.length; i++) {
+      const t = stmt[i];
+      if (t.type !== "operator" || !OPS.has(t.text)) continue;
+      const left = stmt[i - 1];
+      const right = stmt[i + 1];
+      if (!left || !right) continue;
+      const lt = inferTokenType(left, rm, graph);
+      const rt = inferTokenType(right, rm, graph);
+      if (lt && rt && diagIsNumeric(lt) !== diagIsNumeric(rt)) {
+        diags.push({
+          severity: "warning", from: left.start, to: right.end,
+          message: `Possible type mismatch: ${lt} vs ${rt}`,
+        });
+      }
+    }
+  }
+
+  function inferTokenType(tok, rm, graph) {
+    if (tok.type === "string") return "text";
+    if (tok.type === "number") return "numeric";
+    if (tok.type === "identifier" || tok.type === "quoted-identifier") {
+      const name = foldKey(tok.value ?? tok.text, tok.type === "quoted-identifier");
+      if (rm.byAlias.has(name) || rm.byName.has(name)) return null; // relation reference, not value
+      for (const ref of rm.visible) {
+        const col = ref.columns?.find(c => c.key === name);
+        if (col) return col.baseType;
+      }
+      for (const relKey of Object.keys(graph._index.relationByName)) {
+        const col = graph._index.relationByName[relKey].columns.find(c => c.key === name);
+        if (col) return col.baseType;
+      }
+    }
+    return null;
+  }
+
+  function diagIsNumeric(t) {
+    return ["integer", "bigint", "smallint", "numeric", "real", "double precision", "money"]
+      .includes(String(t).toLowerCase());
+  }
+
+  function findMatchingParenIdx(tokens, openIdx) {
+    let depth = 0;
+    for (let i = openIdx; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.type === "punctuation" && t.text === "(") depth++;
+      else if (t.type === "punctuation" && t.text === ")") {
+        depth--;
+        if (depth === 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  function splitTopLevelCommasTokens(tokens) {
+    const out = [];
+    let cur = [];
+    let depth = 0;
+    for (const t of tokens) {
+      if (t.type === "punctuation" && t.text === "(") depth++;
+      else if (t.type === "punctuation" && t.text === ")") depth = Math.max(0, depth - 1);
+      if (t.type === "punctuation" && t.text === "," && depth === 0) {
+        out.push(cur);
+        cur = [];
+      } else {
+        cur.push(t);
+      }
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
+  // Keep the most severe diagnostic for overlapping ranges.
+  function dedupeDiagnostics(diags) {
+    const sorted = [...diags].sort((a, b) => a.from - b.from || a.to - b.to);
+    const out = [];
+    for (const d of sorted) {
+      const prev = out[out.length - 1];
+      if (prev && d.from < prev.to) {
+        if (d.severity === "error" && prev.severity !== "error") out[out.length - 1] = d;
+        continue;
+      }
+      out.push(d);
+    }
+    return out;
   }
 
   // Danger detection
+  // Patterns anchor at statement head (^) — matching is done per statement after
+  // comment stripping, so DDL mentioned inside strings/comments never triggers.
   const DANGER_PATTERNS = [
-    { re: /\bTRUNCATE\b/i, kind: "truncate", severity: "high" },
-    { re: /\bDROP\s+(TABLE|SCHEMA|DATABASE)\b/i, kind: "drop", severity: "high" },
-    { re: /\bALTER\s+TABLE\b[^;]*\bDROP\s+COLUMN\b/i, kind: "alter-drop-column", severity: "medium" },
-    { re: /\bDELETE\s+FROM\b/i, kind: "delete", severity: "medium" },
-    { re: /\bUPDATE\b[^;]*\bSET\b/i, kind: "update", severity: "medium" },
+    { re: /^\s*TRUNCATE\b/i, kind: "truncate", severity: "high" },
+    { re: /^\s*DROP\s+(TABLE|SCHEMA|DATABASE)\b/i, kind: "drop", severity: "high" },
+    { re: /^\s*ALTER\s+TABLE\b[^;]*\bDROP\s+COLUMN\b/i, kind: "alter-drop-column", severity: "medium" },
+    { re: /^\s*DELETE\s+FROM\b/i, kind: "delete", severity: "medium" },
+    { re: /^\s*UPDATE\b[^;]*\bSET\b/i, kind: "update", severity: "medium" },
   ];
+
+  // Strip `-- line` and `/* block */` comments so commented-out DDL
+  // (e.g. `-- DROP TABLE x`) does not trigger false danger matches.
+  function stripSqlComments(sql) {
+    return sql
+      .replace(/--[^\n]*/g, " ")
+      .replace(/\/\*[\s\S]*?\*\//g, " ");
+  }
 
   function quickDetectDangerSync(sql) {
     if (!CONFIG.dangerInterceptEnabled) return null;
-    const trimmed = sql.trim();
+    const noComment = stripSqlComments(sql || "");
+    const trimmed = noComment.trim();
     if (!trimmed) return null;
-    // Find first matching danger pattern
+    // Evaluate each statement independently (split on `;`)
+    const statements = trimmed.split(";").map(s => s.trim()).filter(Boolean);
+    for (const stmt of statements) {
+      const danger = detectDangerInStatement(stmt);
+      if (danger) return danger;
+    }
+    return null;
+  }
+
+  function detectDangerInStatement(stmt) {
     for (const pat of DANGER_PATTERNS) {
-      const m = pat.re.exec(trimmed);
-      if (m) {
-        // Extract target object name if possible
-        const target = extractDangerTarget(trimmed, pat.kind);
-        // Check if DELETE/UPDATE has WHERE
-        if (pat.kind === "delete" || pat.kind === "update") {
-          const afterMatch = trimmed.slice(m.index + m[0].length);
-          const whereIdx = afterMatch.search(/\bWHERE\b/i);
-          if (whereIdx >= 0) {
-            // Check if WHERE is trivially true
-            const whereClause = afterMatch.slice(whereIdx + 6);
-            if (isTriviallyTrueWhere(whereClause)) {
-              return { kind: pat.kind, severity: "high", target, reason: "WHERE clause is trivially true" };
-            }
-            // Has WHERE — not a danger
-            continue;
+      const m = pat.re.exec(stmt);
+      if (!m) continue;
+      // Extract target object name if possible
+      const target = extractDangerTarget(stmt, pat.kind);
+      // Check if DELETE/UPDATE has WHERE
+      if (pat.kind === "delete" || pat.kind === "update") {
+        const afterMatch = stmt.slice(m.index + m[0].length);
+        const whereIdx = afterMatch.search(/\bWHERE\b/i);
+        if (whereIdx >= 0) {
+          // Check if WHERE is trivially true
+          const whereClause = afterMatch.slice(whereIdx + 6);
+          if (isTriviallyTrueWhere(whereClause)) {
+            return { kind: pat.kind, severity: "high", target, reason: "WHERE clause is trivially true" };
           }
-          return { kind: pat.kind, severity: pat.severity, target, reason: `${pat.kind.toUpperCase()} without WHERE clause` };
+          // Has WHERE — not a danger
+          continue;
         }
-        return { kind: pat.kind, severity: pat.severity, target, reason: `${pat.kind} statement` };
+        return { kind: pat.kind, severity: pat.severity, target, reason: `${pat.kind.toUpperCase()} without WHERE clause` };
       }
+      return { kind: pat.kind, severity: pat.severity, target, reason: `${pat.kind} statement` };
     }
     return null;
   }
@@ -1778,83 +2114,173 @@
   // │ Stage 5: Blob URL Worker + main-thread fallback                 │
   // └─────────────────────────────────────────────────────────────────┘
   //
-  // MVP note: Spec mandates a real Worker offload for DDL parsing,
-  // completion, diagnostics. Single-file deployment + closure-captured
-  // algorithm code makes inline-Worker source assembly hard without
-  // duplicating the algorithm. The MVP implementation below performs all
-  // heavy work on the main thread (synchronous), and only probes whether
-  // a Blob Worker *could* be spawned (so we honour "SecurityError →
-  // fallback" semantics). A future enhancement can assemble the Worker
-  // source from `function.toString()` chains + a serialized KEYWORDS set.
+  // Heavy computations (DDL parsing, completion candidate building,
+  // diagnostics) run inside a Blob URL Worker assembled at runtime from
+  // `Function.prototype.toString()` of the pure algorithm functions plus
+  // serialized constants. If pgAdmin CSP blocks Blob Workers
+  // (SecurityError) or the worker fails to post its ready message within
+  // `CONFIG.workerPingTimeoutMs`, every call transparently falls back to
+  // main-thread synchronous execution with the identical call signature.
 
-  let workerProbePromise = null;
-
-  function probeWorker() {
-    if (workerProbePromise) return workerProbePromise;
-    workerProbePromise = new Promise(resolve => {
-      try {
-        const src = `self.onmessage=(e)=>{ if(e.data&&e.data.type==='ping'){ self.postMessage({type:'pong'}); } };`;
-        const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
-        const w = new Worker(url);
-        const timer = setTimeout(() => {
-          try { w.terminate(); } catch {}
-          URL.revokeObjectURL(url);
-          log("worker: ping timeout, falling back to main thread");
-          resolve(false);
-        }, CONFIG.workerPingTimeoutMs);
-        w.onmessage = (ev) => {
-          if (ev.data?.type === "pong") {
-            clearTimeout(timer);
-            try { w.terminate(); } catch {}
-            URL.revokeObjectURL(url);
-            log("worker: probe ok (CSP allows Blob Worker)");
-            resolve(true);
-          }
-        };
-        w.onerror = () => {
-          clearTimeout(timer);
-          try { w.terminate(); } catch {}
-          URL.revokeObjectURL(url);
-          warn("worker: blocked by CSP, falling back to main thread");
-          resolve(false);
-        };
-        w.postMessage({ type: "ping" });
-      } catch (e) {
-        warn("worker: construction failed:", e?.message || e);
-        resolve(false);
-      }
-    });
-    return workerProbePromise;
+  function buildWorkerSource() {
+    const fnNames = [
+      // tokenizer
+      "tokenize", "significantTokens", "splitStatements",
+      // ddl parser
+      "foldKey", "parseDdl", "parseStatement", "readQualifiedName", "parseCreate",
+      "parseCreateSchema", "parseCreateTable", "parseColumnDef", "parseTableConstraint",
+      "parseCreateView", "parseCreateForeignTable", "parseCreateFunction", "parseCreateIndex",
+      "parseAlter", "parseComment", "normalizeBaseType",
+      "parseJsonbAnnotations", "buildIndex",
+      // context parser
+      "findStatementAtCursor", "buildRelationMap", "lookupColumns", "classifyCursor",
+      "findLastClauseKeyword", "findLastOpenParen", "buildCompletionContext",
+      // completion engine
+      "generateCandidates", "buildColumnDoc", "rankCandidates",
+      // diagnostics
+      "runDiagnostics", "checkParenBalance", "checkUnclosedStrings",
+      "checkStatementDiagnostics", "checkClauseOrder", "checkAliasColumns",
+      "checkInsertArity", "checkComparisonTypes", "inferTokenType",
+      "diagIsNumeric", "findMatchingParenIdx", "splitTopLevelCommasTokens",
+      "dedupeDiagnostics",
+    ];
+    const consts = [
+      `const CONFIG = ${JSON.stringify({ maxCandidates: CONFIG.maxCandidates, showSystemTables: CONFIG.showSystemTables })};`,
+      `const PARSER_VERSION = ${JSON.stringify(PARSER_VERSION)};`,
+      `const KEYWORDS = new Set(${JSON.stringify([...KEYWORDS])});`,
+      `const BUILTIN_FUNCTIONS = ${JSON.stringify(BUILTIN_FUNCTIONS)};`,
+      `const COMMON_KEYWORDS = ${JSON.stringify(COMMON_KEYWORDS)};`,
+      `const KEYWORD_CHAR_RE = ${KEYWORD_CHAR_RE.toString()};`,
+      `const IDENT_START_RE = ${IDENT_START_RE.toString()};`,
+      `const DIGIT_RE = ${DIGIT_RE.toString()};`,
+      `const WHITESPACE_RE = ${WHITESPACE_RE.toString()};`,
+      `const PUNCTUATION = new Set(${JSON.stringify([...PUNCTUATION])});`,
+      `const log = () => {}; const warn = () => {}; const error = () => {};`,
+    ];
+    const fnDecls = fnNames
+      .map(name => {
+        const fn = eval(name);
+        return `const ${name} = ${fn.toString()};`;
+      })
+      .join("\n");
+    const dispatcher = `
+      const __handlers = {
+        parseDdl: (a) => parseDdl(a.rawDdl, a.sourceFileName),
+        buildIndex: (a) => buildIndex(a.graph),
+        parseJsonb: (a) => { parseJsonbAnnotations(a.rawDdl, a.graph); return a.graph; },
+        buildCompletionContext: (a) => buildCompletionContext(a.sql, a.cursor, a.graph),
+        generateCandidates: (a) => generateCandidates(a.ctx, a.graph, a.usageMap),
+        runDiagnostics: (a) => runDiagnostics(a.sql, a.graph),
+      };
+      self.postMessage({ type: "pg4:ready" });
+      self.onmessage = (ev) => {
+        const { id, method, args } = ev.data || {};
+        const h = __handlers[method];
+        if (!h) { self.postMessage({ id, ok: false, error: "unknown worker method: " + method }); return; }
+        Promise.resolve().then(() => h(args)).then(
+          (result) => self.postMessage({ id, ok: true, result }),
+          (err) => self.postMessage({ id, ok: false, error: String((err && err.message) || err) })
+        );
+      };
+    `;
+    return `"use strict";\n${consts.join("\n")}\n${fnDecls}\n${dispatcher}`;
   }
 
-  // Worker RPC facade: in MVP, all calls run on main thread synchronously.
-  // The probe result is recorded in `pg4.state.workerAvailable` for status only.
-  async function callWorker(method, args) {
-    // Main-thread dispatch (synchronous). Each method returns a value.
+  // Pending worker RPC calls: id -> { resolve, reject }
+  const workerRpcPending = new Map();
+  let workerRpcSeq = 0;
+
+  function createComputeWorker() {
+    return new Promise(resolve => {
+      let url = null;
+      let w = null;
+      try {
+        const src = buildWorkerSource();
+        url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+        w = new Worker(url);
+      } catch (e) {
+        warn("worker blocked by CSP, falling back to main thread");
+        resolve(null);
+        return;
+      }
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { w.terminate(); } catch {}
+        if (url) URL.revokeObjectURL(url);
+        warn("worker: ready timeout, falling back to main thread");
+        resolve(null);
+      }, CONFIG.workerPingTimeoutMs);
+      w.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { w.terminate(); } catch {}
+        if (url) URL.revokeObjectURL(url);
+        warn("worker: error, falling back to main thread");
+        resolve(null);
+      };
+      w.onmessage = (ev) => {
+        const d = ev.data;
+        if (d?.type === "pg4:ready") {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (url) URL.revokeObjectURL(url);
+          log("worker: compute worker active (Blob URL)");
+          resolve(w);
+          return;
+        }
+        // RPC response
+        if (d && d.id != null && workerRpcPending.has(d.id)) {
+          const p = workerRpcPending.get(d.id);
+          workerRpcPending.delete(d.id);
+          if (d.ok) p.resolve(d.result);
+          else p.reject(new Error(d.error));
+        }
+      };
+    });
+  }
+
+  // Main-thread fallback: identical call signature to the worker handlers.
+  function localCompute(method, args) {
     switch (method) {
-      case "parseDdl": {
-        const { rawDdl, sourceFileName } = args;
-        return parseDdl(rawDdl, sourceFileName);
-      }
-      case "buildIndex": {
+      case "parseDdl":
+        return parseDdl(args.rawDdl, args.sourceFileName);
+      case "buildIndex":
         return buildIndex(args.graph);
-      }
       case "parseJsonb": {
         parseJsonbAnnotations(args.rawDdl, args.graph);
         return args.graph;
       }
-      case "buildCompletionContext": {
+      case "buildCompletionContext":
         return buildCompletionContext(args.sql, args.cursor, args.graph);
-      }
-      case "generateCandidates": {
+      case "generateCandidates":
         return generateCandidates(args.ctx, args.graph, args.usageMap);
-      }
-      case "runDiagnostics": {
+      case "runDiagnostics":
         return runDiagnostics(args.sql, args.graph);
-      }
       default:
         throw new Error(`unknown worker method: ${method}`);
     }
+  }
+
+  // Worker RPC facade. Uses the Blob Worker when available; any worker
+  // failure (or unavailability) transparently falls back to main thread.
+  async function callWorker(method, args) {
+    const w = pg4.state.worker;
+    if (w) {
+      try {
+        return await new Promise((resolve, reject) => {
+          const id = ++workerRpcSeq;
+          workerRpcPending.set(id, { resolve, reject });
+          w.postMessage({ id, method, args });
+        });
+      } catch (e) {
+        warn(`worker call "${method}" failed, falling back to main thread:`, e?.message || e);
+      }
+    }
+    return localCompute(method, args);
   }
 
   // ┌─────────────────────────────────────────────────────────────────┐
@@ -1982,10 +2408,9 @@
     el.__pg4EditorId = editorId;
     pg4.state.editors.set(editorId, session);
     log("editor adopted", editorId);
-    // Wire update listener for hover/dispatch-aware behaviors
-    try {
-      session.updateListener = view.updateListener ? view.updateListener : null;
-    } catch {}
+    // Wire input listener immediately (diagnostics + auto completion trigger)
+    attachViewUpdateListener(session);
+    session.__inputWired = true;
     return session;
   }
 
@@ -2363,16 +2788,73 @@
     if (content && typeof content === "object") {
       const lines = [];
       if (content.qualifiedName) lines.push(`<b>${escapeHtml(content.qualifiedName)}</b>`);
+      if (content.relationKind) lines.push(`Kind: <code>${escapeHtml(content.relationKind)}</code>`);
+      if (content.columnCount !== undefined) lines.push(`Columns: ${content.columnCount}`);
       if (content.type) lines.push(`Type: <code>${escapeHtml(content.type)}</code>`);
       if (content.nullable !== undefined) lines.push(content.nullable ? "Nullable" : "NOT NULL");
       if (content.defaultExpression) lines.push(`Default: <code>${escapeHtml(content.defaultExpression)}</code>`);
       if (content.isPrimaryKey) lines.push("🔑 Primary key");
-      if (content.foreignKey) lines.push("🔗 Foreign key");
+      if (content.foreignKey) {
+        lines.push(content.fkTarget
+          ? `🔗 Foreign key → <code>${escapeHtml(content.fkTarget)}</code>`
+          : "🔗 Foreign key");
+      }
+      if (content.pkColumns) lines.push(`🔑 PK: <code>${escapeHtml(content.pkColumns)}</code>`);
       if (content.comment) lines.push(escapeHtml(content.comment));
       if (content.jsonbPaths) lines.push(`JSONB paths: ${content.jsonbPaths}`);
       return lines.join("<br>");
     }
     return "";
+  }
+
+  // Full relation node from the schema index (summary refs from the relation
+  // map lack comment/nullable/default/jsonbPaths — the full node has them).
+  function findFullRelation(graph, ref) {
+    return graph?._index?.relationByName?.[ref.key] ?? null;
+  }
+
+  function buildColumnHover(graph, ref, colTok) {
+    const colKey = foldKey(colTok.value ?? colTok.text, colTok.type === "quoted-identifier");
+    const full = findFullRelation(graph, ref);
+    const col = full?.columns?.find(c => c.key === colKey) ?? ref.columns?.find(c => c.key === colKey);
+    if (!col) return null;
+    const content = {
+      qualifiedName: `${ref.alias ?? ref.name}.${col.name}`,
+      type: col.dataType,
+      nullable: col.nullable !== false,
+      isPrimaryKey: !!col.isPrimaryKey,
+    };
+    if (col.foreignKey) {
+      content.foreignKey = true;
+      content.fkTarget = `${col.foreignKey.referencedSchema}.${col.foreignKey.referencedTable}`;
+    }
+    if (col.defaultExpression) content.defaultExpression = col.defaultExpression;
+    if (col.comment) content.comment = col.comment;
+    if (Array.isArray(col.jsonbPaths) && col.jsonbPaths.length) {
+      const shown = col.jsonbPaths.slice(0, 8).map(p => {
+        const path = p.displayPath ?? (Array.isArray(p.segments) ? p.segments.join(".") : "");
+        return p.valueType ? `${path}: ${p.valueType}` : path;
+      });
+      content.jsonbPaths = shown.join(", ") + (col.jsonbPaths.length > 8 ? " …" : "");
+    }
+    return content;
+  }
+
+  function buildRelationHover(graph, ref) {
+    const full = findFullRelation(graph, ref);
+    const content = {
+      qualifiedName: `${ref.schema}.${ref.name}` + (ref.alias && ref.alias !== ref.name ? ` (AS ${ref.alias})` : ""),
+      relationKind: full?.kind ?? "relation",
+      columnCount: full?.columns?.length ?? ref.columns?.length ?? 0,
+    };
+    if (full?.primaryKey?.length) {
+      content.pkColumns = full.primaryKey.map(k => {
+        const c = full.columns?.find(x => x.key === k);
+        return c?.name ?? k;
+      }).join(", ");
+    }
+    if (full?.comment) content.comment = full.comment;
+    return content;
   }
 
   function hideHoverCard(session) {
@@ -2568,13 +3050,15 @@
 
       let insertText = text;
       if (CONFIG.pasteMode === "quotes") {
-        // Determine slot kind
-        if (ctx.kind === "insert-value") {
-          // Treat as value: if not numeric/boolean, wrap in single quotes
-          if (!/^-?\d+(\.\d+)?$/.test(text) && !/^(true|false|null)$/i.test(text)) {
+        const slot = classifyPasteSlot(sql, cursor, ctx);
+        if (slot === "string") {
+          // Value slot: if not numeric/boolean/null literal, wrap in single quotes
+          const isNumeric = /^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(text);
+          const isLiteral = /^(true|false|null)$/i.test(text);
+          if (!isNumeric && !isLiteral) {
             insertText = "'" + text.replace(/'/g, "''") + "'";
           }
-        } else if (ctx.kind === "column" || ctx.kind === "qualified-column") {
+        } else if (slot === "identifier") {
           // Identifier slot: wrap in double quotes if contains uppercase/space/special
           if (/[A-Z\s\-]/.test(text) && !/^\d/.test(text)) {
             insertText = '"' + text.replace(/"/g, '""') + '"';
@@ -2584,14 +3068,36 @@
 
       if (insertText !== text) {
         ev.preventDefault();
-        const from = ctx.from, to = ctx.to;
-        // Use from/to from context to replace the prefix being typed
-        // If cursor is in middle of typed prefix, replace it
-        dispatchCompletion(sess.view, from, to, insertText);
+        // Replace the current selection (paste semantics), not the typed prefix
+        const sel = sess.view.state.selection.main;
+        dispatchCompletion(sess.view, sel.from, sel.to, insertText);
       }
     } catch (e) {
       // silent degrade — native paste will proceed
     }
+  }
+
+  // Classify the slot under the cursor for smart paste.
+  // "string" = value slot (wrap in single quotes unless numeric/bool/null);
+  // "identifier" = name slot (wrap in double quotes only when needed);
+  // null = no wrapping.
+  function classifyPasteSlot(sql, cursor, ctx) {
+    // Trust the context parser when it already knows the slot
+    if (ctx.kind === "insert-value") return "string";
+    if (ctx.kind === "column" || ctx.kind === "qualified-column") return "identifier";
+    // Look-back heuristics — covers value slots the parser reports as "unknown",
+    // e.g. `WHERE name = <paste>` / `VALUES (<paste>)` / `IN (<paste>)` / `LIKE <paste>`
+    const before = sql.slice(Math.max(0, cursor - 32), cursor).trimEnd();
+    if (/[<>=!]{1,2}\s*$/.test(before)) {
+      // comparison operator ( = != <> < > <= >= ) directly before cursor → value slot
+      return "string";
+    }
+    if (/\b(VALUES|IN)\s*\(\s*[,]?\s*$/i.test(before)) return "string";
+    if (/\bLIKE$/i.test(before)) return "string";
+    // Identifier slots: right after clause keywords or list separators
+    if (/\b(SELECT(\s+DISTINCT)?|FROM|JOIN|INTO|UPDATE|SET|WHERE|AND|OR|ON|GROUP\s+BY|ORDER\s+BY|TABLE)$/i.test(before)) return "identifier";
+    if (/,$/.test(before)) return "identifier";
+    return null;
   }
 
   // --- Danger click intercept ---
@@ -2616,8 +3122,22 @@
 
   let __pg4BypassClick = false;
 
+  // Query history recording — write-only (no UI per spec);
+  // addQueryHistory prunes to MAX_HISTORY_ROWS via the executedAt index.
+  function recordQueryHistory(session, sql) {
+    try {
+      const trimmed = (sql || "").trim();
+      if (!trimmed) return;
+      addQueryHistory({
+        sql: trimmed.slice(0, 64 * 1024),
+        executedAt: Date.now(),
+        snapshotId: pg4.state.activeSnapshotId ?? null,
+        editorId: session.editorId,
+      }).catch(() => {});
+    } catch {}
+  }
+
   function handleExecuteClickCapture(ev) {
-    if (!CONFIG.dangerInterceptEnabled) return;
     if (__pg4BypassClick) return; // re-dispatched by us — let it through
     const target = ev.target?.closest?.("button");
     if (!isExecuteButton(target)) return;
@@ -2636,6 +3156,11 @@
     if (!sess) return;
 
     const sql = sess.view.state.doc.toString();
+
+    // Record to query history on every execute click (independent of danger switch)
+    recordQueryHistory(sess, sql);
+
+    if (!CONFIG.dangerInterceptEnabled) return;
     const danger = quickDetectDangerSync(sql);
     if (!danger) return;
 
@@ -2772,42 +3297,42 @@
           if (t.start > pos) break;
         }
         if (!tok) return;
-        // Try qualified name resolution
         const idx = sig.indexOf(tok);
         const prev = sig[idx - 1];
         const next = sig[idx + 1];
         let content = null;
-        if (prev?.text === "." || next?.text === ".") {
-          // Could be schema.relation.column
-          // Best-effort: look up in relation map
-          const stmt = findStatementAtCursor(sig, pos);
-          if (stmt) {
-            const rm = buildRelationMap(stmt.tokens, graph);
-            // Find column ref
-            let ref = null;
-            let colName = null;
-            if (prev?.text === ".") {
-              const aliasTok = sig[idx - 2];
+        const stmt = findStatementAtCursor(sig, pos);
+        if (stmt) {
+          const rm = buildRelationMap(stmt.tokens, graph);
+          if (prev?.text === ".") {
+            // <alias|relation|schema>.<…> — column or relation hover
+            const aliasTok = sig[idx - 2];
+            if (aliasTok && (aliasTok.type === "identifier" || aliasTok.type === "quoted-identifier")) {
               const aliasKey = foldKey(aliasTok.value ?? aliasTok.text, aliasTok.type === "quoted-identifier");
-              ref = rm.byAlias.get(aliasKey) ?? rm.byName.get(aliasKey);
-              colName = tok.value ?? tok.text;
-            } else {
-              // next is "." — tok is the relation/alias
-              const aliasKey = foldKey(tok.value ?? tok.text, tok.type === "quoted-identifier");
-              ref = rm.byAlias.get(aliasKey) ?? rm.byName.get(aliasKey);
-              colName = sig[idx + 2]?.value ?? sig[idx + 2]?.text;
-            }
-            if (ref?.columns && colName) {
-              const colKey = foldKey(colName, false);
-              const col = ref.columns.find(c => c.key === colKey);
-              if (col) {
-                content = {
-                  qualifiedName: `${ref.alias ?? ref.name}.${col.name}`,
-                  type: col.dataType, nullable: !col.isPrimaryKey,
-                  isPrimaryKey: col.isPrimaryKey, foreignKey: !!col.isForeignKey,
-                };
+              const ref = rm.byAlias.get(aliasKey) ?? rm.byName.get(aliasKey);
+              if (ref) {
+                // hovering the relation part of `rel.col` shows the relation card;
+                // hovering the column part shows the column card
+                content = next?.text === "."
+                  ? buildRelationHover(graph, ref)
+                  : buildColumnHover(graph, ref, tok);
+              } else if (next?.text === ".") {
+                // schema.relation.column — resolve the relation via the schema index
+                const relKey = `${aliasKey}.${foldKey(tok.value ?? tok.text, tok.type === "quoted-identifier")}`;
+                const rel = graph._index?.relationByName?.[relKey];
+                if (rel) {
+                  content = buildRelationHover(graph, {
+                    key: relKey, schema: aliasTok.value ?? aliasTok.text,
+                    name: rel.name, alias: null, columns: rel.columns,
+                  });
+                }
               }
             }
+          } else if (tok.type === "identifier" || tok.type === "quoted-identifier") {
+            // <relation|alias>. … or a bare relation name in FROM/JOIN — relation hover
+            const aliasKey = foldKey(tok.value ?? tok.text, tok.type === "quoted-identifier");
+            const ref = rm.byAlias.get(aliasKey) ?? rm.byName.get(aliasKey);
+            if (ref) content = buildRelationHover(graph, ref);
           }
         }
         if (content) {
@@ -2871,6 +3396,12 @@
         scheduleDiagnostics(session);
         // If user is typing, hide hover card immediately
         hideHoverCard(session);
+        // Auto-trigger completion while typing ("manual" mode = Ctrl+Space only).
+        // Programmatic view.dispatch (e.g. applying a candidate) does not fire
+        // native `input` events, so no re-trigger loop occurs.
+        if (CONFIG.completionTriggerMode === "auto") {
+          triggerCompletion(session, /*force=*/false);
+        }
       }, { passive: true });
     } catch {}
   }
@@ -3043,35 +3574,9 @@
       importBtn.textContent = "导入中...";
       status.textContent = "解析中...";
       try {
-        const totalDdl = await getAllSnapshotRawSizes();
-        if (totalDdl + pendingText.length > MAX_TOTAL_DDL_BYTES) {
-          throw new Error(`DDL 总量超限（${totalDdl + pendingText.length} > ${MAX_TOTAL_DDL_BYTES} bytes）`);
-        }
         const displayName = nameInput.value.trim() || (pendingFile?.name ?? `snapshot-${Date.now()}`);
-        const snapshotId = `snap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        // Parse
-        const { graph, warnings } = await callWorker("parseDdl", { rawDdl: pendingText, sourceFileName: pendingFile?.name ?? "<inline>" });
-        graph.snapshotId = snapshotId;
-        graph.displayName = displayName;
-        await callWorker("parseJsonb", { rawDdl: pendingText, graph });
-        const index = await callWorker("buildIndex", { graph });
-        // Persist
-        const meta = {
-          snapshotId, displayName, sourceFileName: pendingFile?.name ?? "<inline>",
-          importedAt: new Date().toISOString(),
-          schemaCount: Object.keys(graph.schemas).length,
-          relationCount: Object.values(graph.schemas).reduce((s, sc) => s + Object.keys(sc.relations).length, 0),
-          warningCount: warnings.length,
-        };
-        await putSnapshot({ snapshotId, meta, rawDdl: pendingText });
-        await putSchemaGraphRow({ snapshotId, graph, index });
-        // Auto-activate
-        await activateSnapshot(snapshotId);
-        // Status
-        const schemaCount = meta.schemaCount;
-        const relCount = meta.relationCount;
-        status.textContent = `✓ 导入成功：${schemaCount} schemas, ${relCount} relations, ${warnings.length} warnings`;
-        log(`snapshot imported: ${displayName}, ${schemaCount} schemas, ${relCount} relations, ${warnings.length} warnings`);
+        const { meta, warnings } = await importSnapshotFromText(pendingText, displayName, pendingFile?.name);
+        status.textContent = `✓ 导入成功：${meta.schemaCount} schemas, ${meta.relationCount} relations, ${warnings.length} warnings`;
         if (warnings.length) {
           warnList.style.display = "block";
           warnList.innerHTML = warnings.map(w => `<div>L${w.line}: [${w.code}] ${escapeHtml(w.message)}</div>`).join("");
@@ -3087,6 +3592,42 @@
         importBtn.disabled = !pendingText;
       }
     });
+  }
+
+  // Core import pipeline: parse → JSONB annotate → index → persist → activate.
+  // Shared by the drawer import button, the `.pg4snap.json` migration path, and
+  // smoke/debug harnesses via window.__pg4.
+  async function importSnapshotFromText(rawDdl, displayName, sourceFileName) {
+    const totalDdl = await getAllSnapshotRawSizes();
+    if (totalDdl + rawDdl.length > MAX_TOTAL_DDL_BYTES) {
+      throw new Error(`DDL 总量超限（${totalDdl + rawDdl.length} > ${MAX_TOTAL_DDL_BYTES} bytes）`);
+    }
+    const name = displayName || sourceFileName || `snapshot-${Date.now()}`;
+    const snapshotId = `snap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    // Parse. NOTE: in worker mode each call operates on a structured-clone,
+    // so we must thread the RETURNED graph through the pipeline — annotating
+    // a worker-side clone and discarding it would drop JSONB annotations.
+    const parsed = await callWorker("parseDdl", { rawDdl, sourceFileName: sourceFileName ?? "<inline>" });
+    const warnings = parsed.warnings ?? [];
+    let graph = parsed.graph;
+    graph.snapshotId = snapshotId;
+    graph.displayName = name;
+    graph = await callWorker("parseJsonb", { rawDdl, graph });
+    const index = await callWorker("buildIndex", { graph });
+    // Persist
+    const meta = {
+      snapshotId, displayName: name, sourceFileName: sourceFileName ?? "<inline>",
+      importedAt: new Date().toISOString(),
+      schemaCount: Object.keys(graph.schemas).length,
+      relationCount: Object.values(graph.schemas).reduce((s, sc) => s + Object.keys(sc.relations).length, 0),
+      warningCount: warnings.length,
+    };
+    await putSnapshot({ snapshotId, meta, rawDdl });
+    await putSchemaGraphRow({ snapshotId, graph, index });
+    // Auto-activate
+    await activateSnapshot(snapshotId);
+    log(`snapshot imported: ${name}, ${meta.schemaCount} schemas, ${meta.relationCount} relations, ${warnings.length} warnings`);
+    return { snapshotId, meta, warnings };
   }
 
   async function refreshDrawerLists() {
@@ -3185,10 +3726,12 @@
         warn("IndexedDB open failed:", e?.message || e);
       }
 
-      // 3) Worker probe (status only in MVP)
+      // 3) Compute worker (Blob URL; falls back to main thread on CSP block)
       try {
-        pg4.state.workerAvailable = await probeWorker();
+        pg4.state.worker = await createComputeWorker();
+        pg4.state.workerAvailable = !!pg4.state.worker;
       } catch (e) {
+        pg4.state.worker = null;
         pg4.state.workerAvailable = false;
       }
 
@@ -3273,6 +3816,19 @@
       error("snippet: bootstrap error:", e?.message || e);
     }
   }
+
+  // Debug / test handle — exposes pure algorithm functions for headless
+  // verification (test/headless.mjs) and on-site console debugging.
+  try {
+    window.__pg4 = {
+      CONFIG, state: pg4.state,
+      tokenize, significantTokens, splitStatements,
+      parseDdl, parseJsonbAnnotations, buildIndex,
+      buildCompletionContext, generateCandidates, runDiagnostics,
+      quickDetectDangerSync, stripSqlComments, classifyPasteSlot,
+      buildWorkerSource, localCompute, importSnapshotFromText,
+    };
+  } catch {}
 
   // Run
   bootstrap().catch(e => error("snippet: uncaught:", e?.message || e));
