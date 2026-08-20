@@ -2636,7 +2636,7 @@
       item.setAttribute("role", "option");
       item.setAttribute("aria-selected", i === 0 ? "true" : "false");
       item.innerHTML = `<span class="pg4-icon">${escapeHtml(KIND_ICON[it.kind] ?? "·")}</span>` +
-        `<span class="pg4-label">${escapeHtml(highlightPrefix(it.label, items.prefix || ""))}</span>` +
+        `<span class="pg4-label">${highlightPrefix(it.label, items.prefix || "")}</span>` +
         (it.detail ? `<span class="pg4-detail">${escapeHtml(it.detail)}</span>` : "");
       item.dataset.idx = String(i);
       item.addEventListener("mouseenter", () => setCompletionActive(session, i));
@@ -2653,11 +2653,12 @@
   }
 
   function highlightPrefix(label, prefix) {
-    if (!prefix) return label;
-    const lower = label.toLowerCase();
-    const idx = lower.indexOf(prefix.toLowerCase());
-    if (idx < 0) return label;
-    return label.slice(0, idx) + "<b>" + escapeHtml(label.slice(idx, idx + prefix.length)) + "</b>" + escapeHtml(label.slice(idx + prefix.length));
+    const safe = escapeHtml(label);
+    if (!prefix) return safe;
+    const safePrefix = escapeHtml(prefix);
+    const idx = safe.toLowerCase().indexOf(safePrefix.toLowerCase());
+    if (idx < 0) return safe;
+    return safe.slice(0, idx) + "<b>" + safe.slice(idx, idx + safePrefix.length) + "</b>" + safe.slice(idx + safePrefix.length);
   }
 
   function escapeHtml(s) {
@@ -3082,11 +3083,9 @@
   // "identifier" = name slot (wrap in double quotes only when needed);
   // null = no wrapping.
   function classifyPasteSlot(sql, cursor, ctx) {
-    // Trust the context parser when it already knows the slot
-    if (ctx.kind === "insert-value") return "string";
-    if (ctx.kind === "column" || ctx.kind === "qualified-column") return "identifier";
-    // Look-back heuristics — covers value slots the parser reports as "unknown",
-    // e.g. `WHERE name = <paste>` / `VALUES (<paste>)` / `IN (<paste>)` / `LIKE <paste>`
+    // Look-back heuristics take priority over ctx.kind — a cursor in a "column"
+    // slot (e.g. `WHERE col = <paste>`) still means a value slot for paste.
+    // Covers value slots: `WHERE name = <paste>` / `VALUES (<paste>)` / `IN (<paste>)` / `LIKE <paste>`
     const before = sql.slice(Math.max(0, cursor - 32), cursor).trimEnd();
     if (/[<>=!]{1,2}\s*$/.test(before)) {
       // comparison operator ( = != <> < > <= >= ) directly before cursor → value slot
@@ -3094,7 +3093,11 @@
     }
     if (/\b(VALUES|IN)\s*\(\s*[,]?\s*$/i.test(before)) return "string";
     if (/\bLIKE$/i.test(before)) return "string";
-    // Identifier slots: right after clause keywords or list separators
+    // Trust the context parser for explicit value slots
+    if (ctx.kind === "insert-value") return "string";
+    // Identifier slots: column/qualified-column context (after the value look-backs above),
+    // or right after clause keywords / list separators
+    if (ctx.kind === "column" || ctx.kind === "qualified-column") return "identifier";
     if (/\b(SELECT(\s+DISTINCT)?|FROM|JOIN|INTO|UPDATE|SET|WHERE|AND|OR|ON|GROUP\s+BY|ORDER\s+BY|TABLE)$/i.test(before)) return "identifier";
     if (/,$/.test(before)) return "identifier";
     return null;

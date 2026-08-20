@@ -300,6 +300,14 @@ console.log("\n[7] smart paste slot classification");
   check("no slot after complete value", slot("SELECT * FROM users WHERE id = 1", 32) === null);
   check("insert-value ctx kind → string", pg4.classifyPasteSlot("x", 1, { kind: "insert-value" }) === "string");
   check("column ctx kind → identifier", pg4.classifyPasteSlot("x", 1, { kind: "column" }) === "identifier");
+  // Regression: real buildCompletionContext returns ctx.kind="column" for `WHERE col = <paste>`,
+  // but the look-back heuristic (comparison operator) must take priority → string slot.
+  {
+    const realSql = "SELECT * FROM users WHERE name = ";
+    const realCtx = pg4.buildCompletionContext(realSql, realSql.length, graph);
+    check("regression: WHERE col = → string despite column ctx",
+      pg4.classifyPasteSlot(realSql, realSql.length, realCtx) === "string");
+  }
 }
 
 // ─── 8. Worker source self-containment (sandbox exec) ─────────────────
