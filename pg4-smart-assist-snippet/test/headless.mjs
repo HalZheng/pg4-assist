@@ -242,6 +242,306 @@ console.log("\n[4] completion context + candidates");
   check("jsonb context does not throw", ctx4 != null);
 }
 
+// ─── 4b. Identifier quoting (PostgreSQL case semantics) ──────────────
+// PG folds unquoted identifiers to lowercase; only "quoted" ones keep case.
+// Completion insertText must auto-quote identifiers that require it.
+console.log("\n[4b] identifier quoting (PG case semantics)");
+{
+  const DDL = `
+CREATE SCHEMA "Reporting";
+CREATE TABLE public."Films" (
+  "FilmId" integer PRIMARY KEY,
+  "Title" text NOT NULL,
+  release_year integer,
+  "order" integer
+);
+CREATE TABLE public.actors (
+  actor_id integer PRIMARY KEY
+);
+CREATE TABLE "Reporting".SalesReport (
+  report_id integer PRIMARY KEY
+);
+`;
+  const parsed = pg4.parseDdl(DDL, "case.sql");
+  const g2 = parsed.graph;
+  pg4.buildIndex(g2);
+
+  // ── helper rules ──
+  check("identNeedsQuote: mixed case", pg4.identNeedsQuote("Films") === true);
+  check("identNeedsQuote: lowercase plain", pg4.identNeedsQuote("actors") === false);
+  check("identNeedsQuote: reserved keyword `order`", pg4.identNeedsQuote("order") === true);
+  check("identNeedsQuote: non-reserved keyword `name`", pg4.identNeedsQuote("name") === false);
+  check("identNeedsQuote: leading digit", pg4.identNeedsQuote("1abc") === true);
+  check("identNeedsQuote: space", pg4.identNeedsQuote("My Table") === true);
+  check("quoteIdent escapes inner quotes", pg4.quoteIdent('Weird"Name') === '"Weird""Name"');
+
+  // ── table completion, unquoted prefix ──
+  const q1 = "SELECT * FROM fil";
+  const c1 = pg4.buildCompletionContext(q1, q1.length, g2);
+  const items1 = pg4.generateCandidates(c1, g2, new Map());
+  const films = items1.find(i => i.label === "Films");
+  check("mixed-case table offered for 'fil'", !!films);
+  check("mixed-case table insertText quoted", films?.insertText === '"Films"');
+
+  const q2 = "SELECT * FROM act";
+  const c2 = pg4.buildCompletionContext(q2, q2.length, g2);
+  const items2 = pg4.generateCandidates(c2, g2, new Map());
+  const actors = items2.find(i => i.label === "actors");
+  check("lowercase table offered for 'act'", !!actors);
+  check("lowercase table insertText stays bare", actors?.insertText === "actors");
+
+  // ── qualified-name insertText: quote only the parts that need it ──
+  // Note: the table was created UNQUOTED (`SalesReport`), so PostgreSQL
+  // stored it as `salesreport` — the completion must emit the folded name,
+  // while the quoted schema keeps its exact case.
+  const q3 = "SELECT * FROM sal";
+  const c3 = pg4.buildCompletionContext(q3, q3.length, g2);
+  const items3 = pg4.generateCandidates(c3, g2, new Map());
+  const sr = items3.find(i => i.label === "Reporting.salesreport");
+  check("cross-schema table offered for 'sal'", !!sr);
+  check("cross-schema insertText quotes only the mixed-case schema", sr?.insertText === '"Reporting".salesreport');
+
+  // ── quoted context: user typed an opening quote ──
+  const q4 = 'SELECT * FROM "Fil';
+  const c4 = pg4.buildCompletionContext(q4, q4.length, g2);
+  check("quoted prefix includes opening quote", c4.prefix === '"Fil');
+  const items4 = pg4.generateCandidates(c4, g2, new Map());
+  const filmsQ = items4.find(i => i.label === "Films");
+  check("quoted ctx still offers Films", !!filmsQ);
+  check("quoted ctx insertText closes the quote", filmsQ?.insertText === '"Films"');
+
+  // ── column completion after a quoted-table alias ──
+  const q5 = 'SELECT f. FROM "Films" f';
+  const c5 = pg4.buildCompletionContext(q5, q5.indexOf(".") + 1, g2);
+  check("qualified-column after quoted table", c5.kind === "qualified-column");
+  const items5 = pg4.generateCandidates(c5, g2, new Map());
+  check("mixed-case column quoted", items5.some(i => i.label === "FilmId" && i.insertText === '"FilmId"'));
+  check("reserved-word column quoted", items5.some(i => i.label === "order" && i.insertText === '"order"'));
+  check("plain lowercase column stays bare", items5.some(i => i.label === "release_year" && i.insertText === "release_year"));
+
+  // ── schema-relation after a quoted schema name ──
+  const q6 = 'SELECT * FROM "Reporting".';
+  const c6 = pg4.buildCompletionContext(q6, q6.length, g2);
+  check("schema-relation after quoted schema", c6.kind === "schema-relation");
+  const items6 = pg4.generateCandidates(c6, g2, new Map());
+  check("table listed under quoted schema", items6.some(i => i.label === "salesreport" && i.insertText === "salesreport"));
+}
+
+// ─── 4c. EF Core default naming + closeBrackets pairing ───────────────
+// EF Core (no SnakeCase) quotes every identifier in generated DDL, so the
+// database stores PascalCase names ("UserInfo"."UserId"). Hand-written SQL
+// MUST quote them. Completion must therefore always offer quoted forms for
+// such names, and must not double up quotes when CM closeBrackets has
+// already auto-inserted the closing quote.
+console.log("\n[4c] EF Core default naming + closeBrackets pairing");
+{
+  // Realistic EF Core generated DDL (AspNetUsers-style + PascalCase domain)
+  const EFDDL = `
+CREATE TABLE public."UserInfo" (
+  "UserId" integer PRIMARY KEY,
+  "UserName" text NOT NULL,
+  "CreatedAtUtc" timestamp with time zone NOT NULL
+);
+CREATE TABLE public."Order" (
+  "OrderId" integer PRIMARY KEY,
+  "UserInfoUserId" integer REFERENCES public."UserInfo"("UserId")
+);
+CREATE TABLE public."__EFMigrationsHistory" (
+  "MigrationId" text PRIMARY KEY
+);
+CREATE TABLE public.tags (
+  tag_id integer PRIMARY KEY
+);
+CREATE SCHEMA IF NOT EXISTS ef2;
+CREATE TABLE IF NOT EXISTS ef2."Extra" ("ExtraId" integer PRIMARY KEY);
+`;
+  const p = pg4.parseDdl(EFDDL, "ef.sql");
+  const g3 = p.graph;
+  pg4.buildIndex(g3);
+
+  // IF NOT EXISTS must not leak a phantom "if" schema
+  check("EF: no phantom 'if' schema from IF NOT EXISTS", !g3.schemas.if);
+  check("EF: ef2 schema parsed with Extra table",
+    g3.schemas.ef2?.relations?.["ef2.Extra"] != null);
+  check("EF: Extra insertText quoted", (() => {
+    const q = "SELECT * FROM ef2.extr";
+    const c = pg4.buildCompletionContext(q, q.length, g3);
+    // Qualified partial routes to schema-relation: insertText is the bare
+    // table part; the typed `ef2.` prefix stays in the document.
+    const it = pg4.generateCandidates(c, g3, new Map()).find(i => i.label === "Extra");
+    return it?.insertText === '"Extra"';
+  })());
+
+  // ── schema-qualified partial (FROM ef2.extr) must not duplicate schema ──
+  // The typed `ef2.` prefix stays in the document; insertText carries only the
+  // table part. Applying it over the replace range must yield correct SQL.
+  {
+    const q = "SELECT * FROM ef2.extr";
+    const c = pg4.buildCompletionContext(q, q.length, g3);
+    check("qualified partial: kind is schema-relation", c.kind === "schema-relation");
+    check("qualified partial: from covers only the partial word",
+      c.from === q.indexOf("extr") && c.to === q.length);
+    check("qualified partial: activeSchema is ef2", c.activeSchema === "ef2");
+    const items = pg4.generateCandidates(c, g3, new Map());
+    const ex = items.find(i => i.label === "Extra");
+    check("qualified partial: Extra offered", !!ex);
+    check("qualified partial: insertText is bare table part", ex?.insertText === '"Extra"');
+    const applied = q.slice(0, c.from) + ex.insertText + q.slice(c.to);
+    check("qualified partial: applied SQL has no ef2.ef2. duplication",
+      applied === 'SELECT * FROM ef2."Extra"');
+    // Schema filtering: only ef2 tables offered (no public.tags etc.)
+    check("qualified partial: candidates filtered to ef2 schema",
+      items.length > 0 && items.every(i => g3.schemas.ef2?.relations?.[`ef2.${i.label}`] != null));
+  }
+
+  // ── plain (no quotes typed): PascalCase names must come back quoted ──
+  const q1 = "SELECT * FROM useri";
+  const c1 = pg4.buildCompletionContext(q1, q1.length, g3);
+  const items1 = pg4.generateCandidates(c1, g3, new Map());
+  const ui = items1.find(i => i.label === "UserInfo");
+  check("EF: UserInfo offered", !!ui);
+  check("EF: UserInfo insertText quoted", ui?.insertText === '"UserInfo"');
+
+  const q1b = "SELECT * FROM __efm";
+  const c1b = pg4.buildCompletionContext(q1b, q1b.length, g3);
+  const items1b = pg4.generateCandidates(c1b, g3, new Map());
+  check("EF: __EFMigrationsHistory quoted (leading underscores)",
+    items1b.some(i => i.insertText === '"__EFMigrationsHistory"'));
+
+  // ── qualified column: every PascalCase column quoted ──
+  const q2 = 'SELECT u. FROM "UserInfo" u';
+  const c2 = pg4.buildCompletionContext(q2, q2.indexOf(".") + 1, g3);
+  const items2 = pg4.generateCandidates(c2, g3, new Map());
+  check("EF: UserId quoted", items2.some(i => i.label === "UserId" && i.insertText === '"UserId"'));
+  check("EF: UserName quoted", items2.some(i => i.label === "UserName" && i.insertText === '"UserName"'));
+  check("EF: CreatedAtUtc quoted", items2.some(i => i.label === "CreatedAtUtc" && i.insertText === '"CreatedAtUtc"'));
+
+  // ── closeBrackets pairing: caret BETWEEN the auto-inserted quote pair ──
+  // Editor state after typing `SELECT * FROM "UserI` with closeBrackets ON:
+  // doc = 'SELECT * FROM "UserI"' (closing quote auto-added), caret at 20
+  // (right before the closing quote).
+  const q3 = 'SELECT * FROM "UserI"';
+  const caret3 = q3.indexOf("UserI") + "UserI".length; // 20
+  const c3 = pg4.buildCompletionContext(q3, caret3, g3);
+  check("closeBrackets: replace range swallows both quotes",
+    c3.from === q3.indexOf('"') && c3.to === caret3 + 1);
+  check("closeBrackets: prefix keeps opening quote", c3.prefix === '"UserI');
+  const items3 = pg4.generateCandidates(c3, g3, new Map());
+  const uiP = items3.find(i => i.label === "UserInfo");
+  check("closeBrackets: UserInfo still offered", !!uiP);
+  check("closeBrackets: insertText full quoted form, no doubling", uiP?.insertText === '"UserInfo"');
+  // Simulate applyCompletion: replacing [from,to) with insertText must yield
+  // the correct SQL.
+  const applied = q3.slice(0, c3.from) + uiP.insertText + q3.slice(c3.to);
+  check("closeBrackets: applied SQL correct", applied === 'SELECT * FROM "UserInfo"');
+
+  // Same pairing for an all-lowercase table (tags): the paired-quote context
+  // unifies on the quoted form — valid SQL and no quote doubling.
+  const q4 = 'SELECT * FROM "tag"';
+  const caret4 = q4.indexOf("tag") + 3;
+  const c4 = pg4.buildCompletionContext(q4, caret4, g3);
+  check("closeBrackets lowercase: range covers quotes", c4.from === q4.indexOf('"') && c4.to === caret4 + 1);
+  const items4 = pg4.generateCandidates(c4, g3, new Map());
+  const tag = items4.find(i => i.label === "tags");
+  check("closeBrackets lowercase: tags offered", !!tag);
+  check("closeBrackets lowercase: quoted form, no doubling", tag?.insertText === '"tags"');
+  const applied4 = q4.slice(0, c4.from) + tag.insertText + q4.slice(c4.to);
+  check("closeBrackets lowercase: applied SQL correct", applied4 === 'SELECT * FROM "tags"');
+
+  // ── unpaired quote (closeBrackets OFF) keeps the old behavior ──
+  const q5 = 'SELECT * FROM "UserI';
+  const c5 = pg4.buildCompletionContext(q5, q5.length, g3);
+  check("unpaired: prefix includes opening quote", c5.prefix === '"UserI');
+  const items5 = pg4.generateCandidates(c5, g3, new Map());
+  check("unpaired: closes the quote",
+    items5.find(i => i.label === "UserInfo")?.insertText === '"UserInfo"');
+
+  // ── qualified-column with pairing: u."UserNa" caret before close quote ──
+  const q6 = 'SELECT u."UserNa" FROM "UserInfo" u';
+  const caret6 = q6.indexOf("UserNa") + "UserNa".length;
+  const c6 = pg4.buildCompletionContext(q6, caret6, g3);
+  const items6 = pg4.generateCandidates(c6, g3, new Map());
+  const un = items6.find(i => i.label === "UserName");
+  check("closeBrackets qualified-column: UserName offered", !!un);
+  check("closeBrackets qualified-column: no quote doubling", un?.insertText === '"UserName"');
+  const applied6 = q6.slice(0, c6.from) + un.insertText + q6.slice(c6.to);
+  check("closeBrackets qualified-column: applied SQL correct",
+    applied6 === 'SELECT u."UserName" FROM "UserInfo" u');
+}
+
+// ─── 4d. EF Core 全引号 demo 数据库夹具（test/efcore-quoted-demo.sql） ──
+console.log("\n[4d] EF Core all-quoted demo database fixture");
+{
+  const demoSql = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "efcore-quoted-demo.sql"), "utf8");
+  const p = pg4.parseDdl(demoSql, "efcore-quoted-demo.sql");
+  const g = p.graph;
+  pg4.buildIndex(g);
+
+  const EXPECTED_TABLES = [
+    "AspNetUsers", "AspNetRoles", "AspNetUserRoles",
+    "Category", "Product", "Customer", "Order", "OrderItem",
+    "__EFMigrationsHistory",
+  ];
+  const pub = g.schemas.public;
+  check("demo: exactly 9 tables in public", Object.keys(pub?.relations ?? {}).length === 9);
+  for (const t of EXPECTED_TABLES) {
+    check(`demo: ${t} parsed (case preserved, quoted)`,
+      pub?.relations?.[`public.${t}`] != null);
+  }
+  // DROP/INSERT statements must not create phantom schemas/relations
+  check("demo: no phantom schemas from DROP/INSERT",
+    Object.keys(g.schemas).every(s => s === "public"));
+
+  // Unqualified empty prefix: every table offered bare-quoted, no schema prefix
+  const q0 = "SELECT * FROM ";
+  const c0 = pg4.buildCompletionContext(q0, q0.length, g);
+  const items0 = pg4.generateCandidates(c0, g, new Map());
+  check("demo: empty prefix offers all 9 tables", items0.length === 9);
+  check("demo: every insertText is bare quoted (no schema prefix, no bare name)",
+    items0.every(i => i.insertText === '"' + i.label + '"' && !i.insertText.includes(".")));
+
+  // Lowercase prefix matching PascalCase identifiers
+  const q1 = "SELECT * FROM aspnetu";
+  const c1 = pg4.buildCompletionContext(q1, q1.length, g);
+  const it1 = pg4.generateCandidates(c1, g, new Map()).find(i => i.label === "AspNetUsers");
+  check("demo: aspnetu → AspNetUsers offered", !!it1);
+  check("demo: AspNetUsers insertText quoted", it1?.insertText === '"AspNetUsers"');
+
+  // Reserved-word table name
+  const q2 = "SELECT * FROM ord";
+  const c2 = pg4.buildCompletionContext(q2, q2.length, g);
+  const it2 = pg4.generateCandidates(c2, g, new Map()).find(i => i.label === "Order");
+  check("demo: ord → Order offered (reserved word)", !!it2);
+  check("demo: Order insertText quoted (bare ORDER is a syntax error)",
+    it2?.insertText === '"Order"');
+  const applied2 = q2.slice(0, c2.from) + it2.insertText + q2.slice(c2.to);
+  check("demo: applied SQL is SELECT * FROM \"Order\"", applied2 === 'SELECT * FROM "Order"');
+
+  // Leading-underscore table (EF Core migrations history)
+  const q3 = "SELECT * FROM __efm";
+  const c3 = pg4.buildCompletionContext(q3, q3.length, g);
+  const it3 = pg4.generateCandidates(c3, g, new Map()).find(i => i.label === "__EFMigrationsHistory");
+  check("demo: __efm → __EFMigrationsHistory offered", !!it3);
+  check("demo: __EFMigrationsHistory insertText quoted", it3?.insertText === '"__EFMigrationsHistory"');
+
+  // Column completion after quoted alias: every column bare-quoted
+  const q4 = 'SELECT o. FROM "Order" o';
+  const c4 = pg4.buildCompletionContext(q4, q4.indexOf(".") + 1, g);
+  const items4 = pg4.generateCandidates(c4, g, new Map());
+  for (const col of ["OrderId", "CustomerId", "OrderDate", "ShippedDate", "OrderStatus"]) {
+    check(`demo: column ${col} offered quoted`,
+      items4.some(i => i.label === col && i.insertText === `"${col}"`));
+  }
+
+  // FK-aware completion on the junction table alias
+  const q5 = 'SELECT oi. FROM "OrderItem" oi';
+  const c5 = pg4.buildCompletionContext(q5, q5.indexOf(".") + 1, g);
+  const items5 = pg4.generateCandidates(c5, g, new Map());
+  check("demo: OrderItem columns offered",
+    ["OrderItemId", "OrderId", "ProductId", "Quantity", "UnitPrice"]
+      .every(col => items5.some(i => i.label === col)));
+}
+
 // ─── 5. Diagnostics ───────────────────────────────────────────────────
 console.log("\n[5] diagnostics");
 {

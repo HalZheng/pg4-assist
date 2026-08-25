@@ -301,3 +301,146 @@ pgAdmin 版本或构建：<可见版本、部署信息或未知>
 1. **稳定事实**：多个版本或多个部署环境均观察到的行为，可作为实现依据。
 2. **当前构建事实**：只在某个 pgAdmin 构建中确认，必须附版本或证据，不能直接泛化。
 3. **待验证假设**：由页面结构或错误日志推测，不能作为功能通过标准。
+
+## 12. 验证记录：2026-08-22（标识符引号感知 + EF Core 适配迭代）
+
+```text
+站点：https://upgraded-fishstick-qvjxw74p75r399rj-5050.app.github.dev/browser/
+Query Tool frame：id-query-tool_*.iframe（同源，主文档可经 iframe.contentWindow 直接操作）
+snippet：pg4-smart-assist-snippet/pg4-snippet.js（本地 serve.py :8765 提供，本轮多次迭代）
+Worker：main-thread fallback（站点 CSP 阻止 blob Worker，行为符合设计降级）
+Editor：adopted（editors=1~3，isConnected=true）
+Snapshot：pagila（1 schema / 44 relations）；efcore / ef2（EF Core 风格 DDL 验证用）
+功能矩阵：headless 114/114 通过；真实站点算法层全过、真实键盘端到端（无引号场景）通过
+发现的问题：
+  1. DDL 中未引号创建的混合大小写标识符（如 SalesReport）实际存储为小写折叠形式，
+     旧版 insertText 用源拼写会引用不存在的对象。
+  2. 带引号 schema（"Reporting".）后无法列出表：activeSchema 强制小写折叠导致键查找失败。
+  3. pgAdmin 的 CM6 closeBrackets 会在输入前导双引号时自动补闭合引号；
+     旧版补全 insertText 自带引号对会与残留闭合引号叠加（""UserInfo"" 双引号重复）。
+  4. 浏览器 HTTP 缓存会缓存 serve.py 的 snippet 响应，重注入可能拿到旧版
+     （用 fetch(..., {cache:'no-store'}) + __pg4Active=false 重置解决）。
+修复内容（pg4-snippet.js）：
+  - 新增 RESERVED_KEYWORDS / identNeedsQuote / quoteIdent / identInsert / effName：
+    按需双引号（含大写/特殊字符/前导数字/保留字冲突才加引号），未引号 DDL 名按 PG
+    折叠语义取有效名；EF Core 默认命名（PascalCase 全引号 DDL）下所有表列自动带引号。
+  - generateCandidates 全部标识符候选 insertText 走 identText（引号感知 + 有效名）；
+    限定名各部分独立判断（"Reporting".salesreport）。
+  - buildCompletionContext 新增 closeBrackets 配对检测（wordQuotedPair）：光标两侧
+    紧邻引号对时替换范围吞掉双引号 [from-1, to+1)，insertText 统一完整引号形式，
+    杜绝双引号重复；classifyCursor 内层引号回退跳过配对场景避免抢跑。
+  - schema-relation 修复：activeSchemaQuoted 标志贯穿，带引号 schema 按原样查键。
+  - rankCandidates / 智能粘贴 identifier 槽复用同一套引号规则。
+回归测试：node pg4-smart-assist-snippet/test/headless.mjs → 114/114 通过
+  （新增 [4b] PG 大小写语义 21 项、[4c] EF Core 默认命名 + closeBrackets 配对 20 项）
+环境异常：Codespace 30 分钟无活动休眠导致站点白屏（重启 Codespace + docker compose up -d
+  恢复）；数据库连接密码 MyPassword123!；VS Code web 的 xterm.js 终端无法自动化输入
+  （容器启动需人工执行）。
+```
+
+### 12.1 新技术事实
+
+```text
+发现日期：2026-08-22
+pgAdmin 版本或构建：pgAdmin 4 v9.17（Codespace docker 部署）
+页面/功能：Query Tool 编辑器（CM6）
+观察条件：Query Tool iframe 内 evaluate；真实键盘逐字输入 SELECT * FROM "act
+观察结果：
+  1. CM6 closeBrackets 生效：输入前导 " 自动补闭合引号，光标停在两引号之间
+     （文档为 "act"，光标在末引号前）。
+  2. 程序化 view.dispatch 不触发 DOM input 事件——snippet 的补全自动触发挂在
+     session.el 的 input 事件上（设计上防止 applyCompletion 循环触发），
+     因此自动化测试用 dispatch 设置文档不会弹出补全菜单，必须走真实键盘输入。
+  3. 真实键盘 Enter 经 CodeMirror keymap 正确路由到 handleCompletionKeydown
+     （B5 验证通过）；JS 派发 KeyboardEvent('keydown') 不会走 CM keymap，不能用于
+     模拟 Enter 提交。
+对增强功能的影响：补全引擎必须同时处理三种引号上下文——裸前缀（act）、未闭合引号
+  （"act 无闭合）、closeBrackets 配对（"act" 光标在中间），三者 from/to/insertText
+  组合各不相同；配对场景若不吞掉双侧引号会产生双引号重复。
+验证方式：headless.mjs [4b]/[4c]（114/114）+ 真实站点算法层验证（清缓存重注入后
+  from=14/to=21/insertText='"UserInfo"'/appliedOk=true）
+```
+
+## 13. 验证记录：2026-08-23（EF Core 端到端：补全产物真实执行对照）
+
+```text
+站点：https://upgraded-fishstick-qvjxw74p75r399rj-5050.app.github.dev/browser/
+Query Tool frame：id-query-tool_4674990（innerW=963，hasEditor=true）
+snippet：pg4-snippet.js（cache:'no-store' 重注入，快照 efcore8）
+测试数据：ef schema 三张区分大小写表（真实数据库已建）：
+  ef."UserInfo"("UserId","UserName","CreatedAtUtc")
+  ef."Order"("OrderId","UserInfoUserId" FK→UserInfo,"TotalAmount")
+  ef."__EFMigrationsHistory"("MigrationId")
+验证场景与结果（__diagResult）：
+  场景2 schema-relation 空前缀（SELECT * FROM ef.|）：menuOpen=true，
+    items = UserInfo→"UserInfo"、Order→"Order"、
+            __EFMigrationsHistory→"__EFMigrationsHistory"（裸表名自动加引号）
+  场景3 应用候选：scene3 = SELECT * FROM ef."UserInfo"（appliedIns="UserInfo"）
+  真实执行对照（Execute script 按钮）：
+    quotedExec：SELECT * FROM ef."UserInfo" LIMIT 3 → Total rows，无 ERROR ✅
+    bareExec：  SELECT * FROM ef.UserInfo  LIMIT 3 → relation does not exist ❌（符合预期）
+  结论：补全产物带引号 SQL 真实执行成功；裸名真实报错——证明 EF Core 默认命名下
+  自动加引号是正确性要求而非风格偏好。
+回归测试：node test/headless.mjs → 124/124 通过
+```
+
+### 13.0 EF Core 真实默认场景（public schema、无前缀）验证：2026-08-23 补充
+
+```text
+用户核心需求确认：EF Core 默认（无 snake_case）→ 补全自动加 " " → UserInfo 大小写保留
+→ 必须写 "UserInfo" 否则报错。默认 schema 是 public（EF Core 不配置 schema 时
+建表落 public），不是自定义 schema。
+验证结果（真实站点，快照 efcore-pub = 无 schema 前缀的 EF Core DDL）：
+  1. 无前缀小写补全：SELECT * FROM useri
+     → menuOpen=true，items 含 UserInfo→"UserInfo"
+     （public 表：自动加引号、不带 schema 前缀、大小写保留）
+  2. 应用候选：sceneApply = SELECT * FROM "UserInfo"（appliedIns='"UserInfo"'）
+  3. 带引号真实执行：SELECT * FROM "UserInfo" LIMIT 3 → 查询成功（Total rows）
+行为规则（与代码一致，headless [4c] 覆盖）：
+  - 表在 public（EF Core 默认）→ 无前缀补全插入 "UserInfo"（仅引号，无 schema）
+  - 用户键入 schema 前缀（ef.）→ 只补表名部分 "UserInfo"，前缀留在文档里
+  - 表在非 public schema 且无前缀补全 → 插入限定形式 ef."UserInfo"
+    （PG 语义要求：search_path 不含 ef 时裸名/仅引号名都无法解析，必须限定）
+重要发现：真实库 public 残留一个折叠小写表 userinfo（早期未引号 DDL 测试产物），
+  导致裸名 SELECT * FROM UserInfo 不报错而是【静默解析到错误对象】——比报错更危险。
+  这正是 identNeedsQuote 存在的理由：裸名折叠语义下，同名折叠表存在时查到的是
+  另一张表的数据。残留表的 DROP 因环境故障未完成确认（见 13.2）。
+未完成项（环境故障阻断）：public 场景裸名报错的执行演示。但该语义与 ef 场景
+  完全一致（§13 已真实捕获 relation does not exist），属同一 PG 折叠规则。
+```
+
+### 13.1 浏览器自动化操作教训（pgAdmin 站点，2026-08-23 实战总结）
+
+```text
+1. 左侧纵向图标栏：永远停留在左上角第一个按钮（Default Workspace，带对象浏览器），
+   遇事不决点它。绝对禁止：第二个图标（重新连接）、"Query Tool Workspace" 标签
+   （点它会把页面切到无连接空白态，所有 Query Tool iframe 变 0x0）。
+2. "保存查询变更？"弹窗随手点"不要保存"。
+3. 对象浏览器树节点是 div.file-entry（不是 li），展开箭头为 <i class="directory-toggle">，
+   点节点文字不会展开；已展开的 toggle 带 open 类。节点文字在 span.file-name，
+   界面为中文（"数据库"而非 Databases）。选中节点：点 .file-label。
+4. 打开 Query Tool：选中 pagila 后右键 → "查询工具"。
+5. browser_evaluate 返回值可能丢失：用两步法（脚本写 window.__x，再单独 evaluate 读取）。
+6. 环境恢复：Codespace 唤醒 → 人工 docker compose up -d → 本地 python test/serve.py :8765。
+```
+
+### 13.2 pgAdmin 执行与故障教训（2026-08-23 深夜轮）
+
+```text
+1. Execute 按钮程序化 .click() 不可靠：约半数点击不触发执行。判别法——连续两次
+   读取状态栏（class 含 StatusBar 元素）时长完全相同（如 00:00:00.738 成对出现）
+   即为陈旧值；且数据输出面板持续显示"无数据输出。执行查询以获得输出。"占位符。
+   可靠方式：browser_click 用快照元素 ref 真实点击（受信任事件），每次执行后
+   重新快照（pgAdmin 执行后重渲染工具栏，ref 会失效）。
+2. innerText 是布局感知的：消息面板虚拟化/滚动裁剪后 innerText 拿不到内容。
+   要完整文本用 textContent；查询结果标记建议用 RAISE EXCEPTION 'PG4DIAG...'，
+   在 textContent 全文搜标记定位。
+3. 消息行可能被拆分渲染（叶子元素不含完整标记串），搜标记要对所有元素（含非叶子）
+   或直接 body.textContent。
+4. "Quit pgAdmin 4" 确认弹窗：必须点取消。误确认/误触发 Quit 流程会杀掉 pgAdmin
+   后端 worker——之后前端全部 API 404（"Failed to fetch data"）、Query Tool 卡
+   "加载中"、整页刷新也回不到浏览器页（停在 "Let's connect to the server"）。
+   恢复只能重启容器：docker compose restart pgadmin（终端无法自动化，需人工）。
+5. 状态栏结构：Total rows / 查询完成+时长 / 光标行列，各为独立元素，
+   textContent 拼接后形如 "Total rows: § 查询完成 00:00:00.743 § CRLFLF CRLF 行数 1，列数 25"。
+```

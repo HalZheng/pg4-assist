@@ -10,6 +10,16 @@
 (() => {
   "use strict";
 
+  // Idempotency guard at IIFE top level. Re-running the snippet must be a
+  // complete no-op: without this early return, the tail assignment
+  // `window.__pg4 = { ... state: pg4.state ... }` would replace the LIVE
+  // instance's debug handle with a fresh, uninitialized state (editors: 0,
+  // worker: null), making the real instance unreachable from the console.
+  if (window.__pg4Active) {
+    try { console.log("[pg4] snippet: already active, skipping"); } catch {}
+    return;
+  }
+
   // ┌─────────────────────────────────────────────────────────────────┐
   // │ CONFIG                                                          │
   // └─────────────────────────────────────────────────────────────────┘
@@ -265,7 +275,10 @@
   const WHITESPACE_RE = /\s/;
   const PUNCTUATION = new Set(["(", ")", ",", ";", ".", "[", "]", ":", "*"]);
 
-  const KEYWORDS = new Set([
+  // Truly reserved keywords (PG docs: cannot appear as table/column names
+  // without quoting). Kept separate from KEYWORDS so identifier quoting can
+  // tell them apart from merely non-reserved keywords (e.g. `name`).
+  const RESERVED_KEYWORDS = new Set([
     "ALL","ANALYSE","ANALYZE","AND","ANY","ARRAY","AS","ASC","ASYMMETRIC","AUTHORIZATION",
     "BINARY","BOTH","CASE","CAST","CHECK","COLLATE","COLLATION","COLUMN","CONCURRENTLY","CONSTRAINT",
     "CREATE","CROSS","CURRENT_CATALOG","CURRENT_DATE","CURRENT_ROLE","CURRENT_SCHEMA","CURRENT_TIME",
@@ -276,6 +289,10 @@
     "ON","ONLY","OR","ORDER","OUTER","OVERLAPS","PLACING","PRIMARY","REFERENCES","RETURNING",
     "RIGHT","SELECT","SESSION_USER","SIMILAR","SOME","SYMMETRIC","TABLE","TABLESAMPLE","THEN","TO",
     "TRAILING","TRUE","UNION","UNIQUE","USER","USING","VARIADIC","VERBOSE","WHEN","WHERE","WINDOW","WITH",
+  ]);
+
+  const KEYWORDS = new Set([
+    ...RESERVED_KEYWORDS,
     "ABORT","ABSOLUTE","ACCESS","ACTION","ADD","ADMIN","AFTER","AGGREGATE","ALSO","ALTER","ALWAYS",
     "ASSERTION","ASSIGNMENT","AT","ATTACH","ATTRIBUTE","BACKWARD","BEFORE","BEGIN","BY","CACHE","CALL",
     "CALLED","CASCADE","CASCADED","CATALOG","CHAIN","CHARACTERISTICS","CHECKPOINT","CLASS","CLOSE","CLUSTER",
@@ -303,9 +320,33 @@
     "STORED","STRICT","STRIP","SUBSCRIPTION","SYSID","SYSTEM","TABLES","TABLESPACE","TEMP","TEMPLATE",
     "TEMPORARY","TEXT","TRANSACTION","TRANSFORM","TRIGGER","TRUNCATE","TRUSTED","TYPE","TYPES","UNBOUNDED",
     "UNCOMMITTED","UNENCRYPTED","UNKNOWN","UNLISTEN","UNLOGGED","UNTIL","UPDATE","VACUUM","VALID","VALIDATE",
-    "VALIDATOR","VALUE","VARIABLE","VARYING","VERSION","VIEW","VIEWS","VIRTUAL","VOLATILE","WHITESPACE",
+    "VALIDATOR","VALUE","VARIABLE","VARYING","VALUES","VERSION","VIEW","VIEWS","VIRTUAL","VOLATILE","WHITESPACE",
     "WITHIN","WITHOUT","WORK","WRAPPER","WRITE","XML","YEAR","YEARS","YES","ZONE",
   ]);
+
+  // PostgreSQL folds unquoted identifiers to lowercase; only double-quoted
+  // identifiers keep their exact case (and are case-sensitive). An identifier
+  // must be quoted when it carries uppercase / special characters / a leading
+  // digit, or collides with a reserved keyword — otherwise the unquoted form
+  // silently resolves to a different (lowercased) object or fails to parse.
+  function identNeedsQuote(name) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(name)) return true;
+    return RESERVED_KEYWORDS.has(name.toUpperCase());
+  }
+  function quoteIdent(name) { return '"' + String(name).replace(/"/g, '""') + '"'; }
+  // insertText for an identifier candidate. `forceQuoted` is set when the
+  // user opened a `"` (the replace range covers the opening quote, so the
+  // completion must supply the closing one as well).
+  function identInsert(name, forceQuoted) {
+    return forceQuoted || identNeedsQuote(name) ? quoteIdent(name) : name;
+  }
+  // Effective stored name of an identifier: PostgreSQL lowercases unquoted
+  // identifiers (`CREATE TABLE Films` actually creates `films`), while quoted
+  // ones keep their exact case. Completion must emit the effective name or
+  // the generated SQL would reference a non-existent object.
+  function effName(name, quoted) {
+    return quoted ? name : String(name).toLowerCase();
+  }
 
   function tokenize(sql) {
     const tokens = [];
@@ -560,6 +601,13 @@
     const kindTok = sig[i++];
     if (!kindTok) return;
     const kind = kindTok.text.toUpperCase();
+    // Skip IF NOT EXISTS (e.g. CREATE TABLE IF NOT EXISTS / CREATE SCHEMA IF
+    // NOT EXISTS) — otherwise `IF` is misread as the schema/relation name.
+    if (sig[i]?.type === "keyword" && sig[i].text.toUpperCase() === "IF") {
+      i++;
+      if (sig[i]?.text.toUpperCase() === "NOT") i++;
+      if (sig[i]?.text.toUpperCase() === "EXISTS") i++;
+    }
     switch (kind) {
       case "SCHEMA": parseCreateSchema(sig, i, ensureSchema); break;
       case "TABLE": parseCreateTable(sig, i, graph, ensureSchema, warnings); break;
@@ -1262,6 +1310,7 @@
                   name: cteName,
                   alias: cteName,
                   cteName,
+                  cteQuoted,
                   columns: [],
                 };
                 visible.push(ref);
@@ -1341,7 +1390,7 @@
     const rel = graph._index.relationByName[relKey];
     if (!rel) return undefined;
     return rel.columns.map(c => ({
-      name: c.name, key: c.key, dataType: c.dataType, baseType: c.baseType,
+      name: c.name, key: c.key, quoted: c.quoted, dataType: c.dataType, baseType: c.baseType,
       isPrimaryKey: c.isPrimaryKey, isForeignKey: !!c.foreignKey, jsonb: c.baseType === "jsonb",
     }));
   }
@@ -1359,6 +1408,17 @@
       const ch = sql[prefixStart - 1];
       if (/[A-Za-z0-9_]/.test(ch)) prefixStart--;
       else break;
+    }
+    // Quote-aware prefix: PostgreSQL folds unquoted identifiers to lowercase;
+    // a `"` right before the word means the user is typing a quoted
+    // (case-sensitive) identifier. Include the opening quote in prefix and
+    // `from` so applyCompletion swaps the whole partial token, including it.
+    if (prefixStart > 0 && sql[prefixStart - 1] === '"') {
+      const candidate = sql.slice(prefixStart - 1, cursor);
+      // exactly one quote (the opener) → still unclosed. Skip when a closing
+      // quote sits right after the caret (closeBrackets pairing) — that case
+      // is handled by buildCompletionContext, which swallows BOTH quotes.
+      if ((candidate.match(/"/g) || []).length === 1 && sql[cursor] !== '"') prefixStart--;
     }
     const prefix = sql.slice(prefixStart, cursor);
 
@@ -1381,7 +1441,7 @@
         const key = foldKey(identName, identQuoted);
         // Is it a schema?
         if (graph?._index?.schemas?.[key]) {
-          return { kind: "schema-relation", from: prefixStart, to: cursor, prefix, activeSchema: identName };
+          return { kind: "schema-relation", from: prefixStart, to: cursor, prefix, activeSchema: identName, activeSchemaQuoted: identQuoted };
         }
         // Is it an alias?
         const ref = rm.byAlias.get(key);
@@ -1430,6 +1490,48 @@
       }
     }
 
+    // Paren-scoped slots. NOTE: findLastClauseKeyword stops at "(", so
+    // INSERT INTO t (…) / VALUES (…) / IN (…) must be detected here, by
+    // inspecting what directly precedes the nearest unclosed "(".
+    {
+      const openParenIdx = findLastOpenParen(tokens, prevIdx);
+      if (openParenIdx > 0) {
+        const before = tokens[openParenIdx - 1];
+        const beforeUpper = before?.type === "keyword" ? before.text.toUpperCase() : null;
+        if (beforeUpper === "VALUES") {
+          return { kind: "insert-value", from: prefixStart, to: cursor, prefix };
+        }
+        if (beforeUpper === "IN") {
+          // IN ( … ) — value list slot
+          return { kind: "insert-value", from: prefixStart, to: cursor, prefix };
+        }
+        if (before?.type === "identifier" || before?.type === "quoted-identifier") {
+          // (<ident> ( … — column list only if content so far is identifiers/commas
+          let isIdentList = true;
+          for (let i = openParenIdx + 1; i <= prevIdx; i++) {
+            const t = tokens[i];
+            if (t.type === "identifier" || t.type === "quoted-identifier") continue;
+            if (t.type === "punctuation" && t.text === ",") continue;
+            isIdentList = false; break;
+          }
+          if (isIdentList) {
+            // Walk back over [schema.]table before the "(" looking for INTO
+            let k = openParenIdx - 1;
+            let identCount = 0;
+            while (k >= 0) {
+              const t = tokens[k];
+              if (t.type === "identifier" || t.type === "quoted-identifier") { identCount++; k--; continue; }
+              if (t.type === "punctuation" && t.text === "." && identCount > 0) { k--; continue; }
+              break;
+            }
+            if (identCount > 0 && k >= 0 && tokens[k].type === "keyword" && tokens[k].text.toUpperCase() === "INTO") {
+              return { kind: "insert-column", from: prefixStart, to: cursor, prefix };
+            }
+          }
+        }
+      }
+    }
+
     // Look back for a clause keyword that determines the slot
     const clauseKwIdx = findLastClauseKeyword(tokens, prevIdx);
     const clauseKw = clauseKwIdx >= 0 ? tokens[clauseKwIdx].text.toUpperCase() : null;
@@ -1443,6 +1545,26 @@
         if (tokIdx >= 0) {
           // Check the keyword before "(" — should be a relation name; the slot is insert-column
           return { kind: "insert-column", from: prefixStart, to: cursor, prefix };
+        }
+      }
+      // Qualified relation slot: `FROM ef.useri` — the partial word is the
+      // table part of a schema-qualified name. Route to schema-relation so
+      // candidates are schema-filtered and insertText carries ONLY the table
+      // part (`"UserInfo"`); the typed `ef.` prefix stays in the document.
+      // Without this, the plain relation branch returns fully-qualified
+      // insertText (`ef."UserInfo"`) and applying it over just `useri`
+      // duplicates the schema (ef.ef."UserInfo").
+      if (prefixStart >= 2 && sql[prefixStart - 1] === ".") {
+        let sStart = prefixStart - 1;
+        while (sStart > 0 && /[A-Za-z0-9_]/.test(sql[sStart - 1])) sStart--;
+        let schemaQuoted = false;
+        if (sStart > 0 && sql[sStart - 1] === '"') { schemaQuoted = true; sStart--; }
+        const schemaName = sql.slice(sStart + (schemaQuoted ? 1 : 0), prefixStart - 1);
+        if (schemaName) {
+          const sKey = foldKey(schemaName, schemaQuoted);
+          if (graph?._index?.schemas?.[sKey]) {
+            return { kind: "schema-relation", from: prefixStart, to: cursor, prefix, activeSchema: schemaName, activeSchemaQuoted: schemaQuoted };
+          }
         }
       }
       return { kind: "relation", from: prefixStart, to: cursor, prefix };
@@ -1515,14 +1637,28 @@
     if (!stmt) return { kind: "unknown", from: 0, to: 0, prefix: "", visibleRelations: [] };
     const rm = buildRelationMap(stmt.tokens, graph);
     const r = classifyCursor(stmt, cursor, sql, rm, graph);
+    // closeBrackets pairing: editors with CM closeBrackets auto-insert the
+    // closing `"` right after the caret (`FROM "UserInf"`, caret before the
+    // closing quote). The typed word sits BETWEEN a quote pair, so the
+    // replace range must swallow BOTH quotes and insertText must emit the
+    // full quoted form — otherwise a quoted insertText (e.g. `"UserInfo"`)
+    // would double up the quotes (`""UserInfo""`).
+    const wordQuotedPair =
+      !r.prefix.startsWith('"') &&
+      r.from > 0 && sql[r.from - 1] === '"' &&
+      r.to < sql.length && sql[r.to] === '"';
+    const from = wordQuotedPair ? r.from - 1 : r.from;
+    const to = wordQuotedPair ? r.to + 1 : r.to;
+    const prefix = wordQuotedPair ? '"' + r.prefix : r.prefix;
     return {
       kind: r.kind,
-      from: r.from,
-      to: r.to,
-      prefix: r.prefix,
+      from,
+      to,
+      prefix,
       activeAlias: r.activeAlias,
       activeRelation: r.activeRelation,
       activeSchema: r.activeSchema,
+      activeSchemaQuoted: r.activeSchemaQuoted,
       visibleRelations: rm.visible,
       jsonb: r.jsonb,
     };
@@ -1588,8 +1724,31 @@
 
   function generateCandidates(ctx, graph, usageMap) {
     const out = [];
-    const lower = ctx.prefix.toLowerCase();
-    const matchPrefix = (text) => !lower || text.toLowerCase().includes(lower);
+    // Quote-aware context: a prefix starting with `"` means the user is
+    // typing a quoted (case-preserving) identifier; candidates must emit the
+    // full quoted form because the replace range includes the opening quote.
+    const quotedCtx = (ctx.prefix ?? "").startsWith('"');
+    // insertText for an identifier candidate: effective (fold-aware) name,
+    // quoted when PostgreSQL requires it (or when the user opened a `"`).
+    const identText = (name, quoted) => identInsert(effName(name, quoted), quotedCtx);
+    // Strip the leading quote before lowercasing so prefix matching still
+    // works in quoted context.
+    const lower = (ctx.prefix ?? "").replace(/^"/, "").toLowerCase();
+    // Boundary-aware prefix match: candidate must START with the prefix at a
+    // segment boundary (label start, or after `_` `.` `-` `$`), instead of
+    // matching anywhere (which turned `or` into "actor", "category", …).
+    const matchPrefix = (text) => {
+      if (!lower) return true;
+      const t = text.toLowerCase();
+      if (t.startsWith(lower)) return true;
+      for (let i = 1; i < t.length; i++) {
+        const ch = t[i - 1];
+        if (ch === "_" || ch === "." || ch === "-" || ch === "$" || ch === "/") {
+          if (t.startsWith(lower, i)) return true;
+        }
+      }
+      return false;
+    };
 
     switch (ctx.kind) {
       case "relation": {
@@ -1597,11 +1756,20 @@
           for (const relKey of Object.keys(graph._index.relationByName)) {
             const rel = graph._index.relationByName[relKey];
             if (!CONFIG.showSystemTables && (rel.schema === "pg_catalog" || rel.schema === "information_schema")) continue;
-            const label = rel.schema === "public" ? rel.name : `${rel.schema}.${rel.name}`;
+            const schemaNode = graph.schemas?.[relKey.split(".")[0]];
+            const relName = effName(rel.name, rel.quoted);
+            const label = rel.schema === "public"
+              ? relName
+              : `${effName(schemaNode?.name ?? rel.schema, schemaNode?.quoted)}.${relName}`;
             if (!matchPrefix(label) && !matchPrefix(rel.name)) continue;
             out.push({
               kind: rel.kind === "view" ? "view" : (rel.kind === "materialized-view" ? "view" : "table"),
-              label, detail: rel.kind, insertText: rel.schema === "public" ? rel.name : label,
+              label, detail: rel.kind,
+              // Quote each part of the qualified name independently when needed
+              // (`"My Schema"."MyTable"`), keeping plain lowercase names bare.
+              insertText: rel.schema === "public"
+                ? identText(rel.name, rel.quoted)
+                : `${identText(schemaNode?.name ?? rel.schema, schemaNode?.quoted)}.${identText(rel.name, rel.quoted)}`,
               filterText: label, score: 0, source: "schema",
               symbolKey: `rel:${relKey}`,
             });
@@ -1610,27 +1778,28 @@
         // CTEs
         for (const ref of ctx.visibleRelations) {
           if (ref.cteName && matchPrefix(ref.cteName)) {
-            out.push({ kind: "cte", label: ref.cteName, detail: "CTE", insertText: ref.cteName, filterText: ref.cteName, score: 0, source: "schema", symbolKey: `cte:${ref.cteName.toLowerCase()}` });
+            out.push({ kind: "cte", label: effName(ref.cteName, ref.cteQuoted), detail: "CTE", insertText: identText(ref.cteName, ref.cteQuoted), filterText: ref.cteName, score: 0, source: "schema", symbolKey: `cte:${ref.cteName.toLowerCase()}` });
           }
         }
         break;
       }
       case "schema-relation": {
         if (graph?._index && ctx.activeSchema) {
-          const schemaKey = foldKey(ctx.activeSchema, false);
+          // Honor the quoting flag: a schema created as "Reporting" is keyed
+          // case-sensitively; folding it to lowercase would miss it.
+          const schemaKey = foldKey(ctx.activeSchema, ctx.activeSchemaQuoted ?? false);
           const schema = graph._index.schemas[schemaKey];
           if (schema) {
             for (const relKey of Object.keys(schema.relations)) {
               const rel = schema.relations[relKey];
               if (!matchPrefix(rel.name)) continue;
-              out.push({ kind: "table", label: rel.name, detail: rel.kind, insertText: rel.name, filterText: rel.name, score: 0, source: "schema", symbolKey: `rel:${relKey}` });
+              out.push({ kind: "table", label: effName(rel.name, rel.quoted), detail: rel.kind, insertText: identText(rel.name, rel.quoted), filterText: rel.name, score: 0, source: "schema", symbolKey: `rel:${relKey}` });
             }
           }
         }
         break;
       }
-      case "column":
-      case "qualified-column": {
+      case "column": {
         const rels = ctx.activeRelation ? [ctx.activeRelation] : ctx.visibleRelations;
         const seen = new Set();
         for (const ref of rels) {
@@ -1640,14 +1809,16 @@
             if (seen.has(col.key)) continue;
             seen.add(col.key);
             out.push({
-              kind: "column", label: col.name, detail: col.dataType,
-              insertText: col.name, filterText: col.name, score: 0, source: "schema",
+              kind: "column", label: effName(col.name, col.quoted), detail: col.dataType,
+              insertText: identText(col.name, col.quoted), filterText: col.name, score: 0, source: "schema",
               symbolKey: `col:${ref.key}.${col.key}`,
               documentation: buildColumnDoc(col, ref),
             });
           }
         }
-        // Also suggest functions
+        // In a bare column slot (SELECT list / WHERE …) a bare word can also
+        // start a function call, so functions stay available — but ranking
+        // (rankCandidates) keeps columns on top.
         for (const fn of BUILTIN_FUNCTIONS) {
           if (matchPrefix(fn.name)) {
             out.push({ kind: "function", label: fn.name + "()", detail: fn.returnType, insertText: fn.name + "()", filterText: fn.name, score: 0, source: "builtin", symbolKey: `fn:${fn.name}` });
@@ -1657,7 +1828,29 @@
         if (graph?.functions) {
           for (const fn of graph.functions) {
             if (!matchPrefix(fn.name)) continue;
-            out.push({ kind: "function", label: fn.name + "()", detail: fn.returnType, insertText: fn.name + "()", filterText: fn.name, score: 0, source: "schema", symbolKey: `fn:${fn.key}` });
+            out.push({ kind: "function", label: effName(fn.name, fn.quoted) + "()", detail: fn.returnType, insertText: identText(fn.name, fn.quoted) + "()", filterText: fn.name, score: 0, source: "schema", symbolKey: `fn:${fn.key}` });
+          }
+        }
+        break;
+      }
+      case "qualified-column": {
+        // `alias.` / `table.` — ONLY that relation's columns belong here.
+        // Functions after an alias qualifier are invalid SQL; mixing them in
+        // buried the 4 relevant columns under 46 functions.
+        const rels = ctx.activeRelation ? [ctx.activeRelation] : ctx.visibleRelations;
+        const seen = new Set();
+        for (const ref of rels) {
+          if (!ref.columns) continue;
+          for (const col of ref.columns) {
+            if (!matchPrefix(col.name)) continue;
+            if (seen.has(col.key)) continue;
+            seen.add(col.key);
+            out.push({
+              kind: "column", label: effName(col.name, col.quoted), detail: col.dataType,
+              insertText: identText(col.name, col.quoted), filterText: col.name, score: 0, source: "schema",
+              symbolKey: `col:${ref.key}.${col.key}`,
+              documentation: buildColumnDoc(col, ref),
+            });
           }
         }
         break;
@@ -1687,7 +1880,7 @@
           if (ref.columns) {
             for (const col of ref.columns) {
               if (!matchPrefix(col.name)) continue;
-              out.push({ kind: "column", label: col.name, detail: col.dataType, insertText: col.name, filterText: col.name, score: 0, source: "schema", symbolKey: `col:${ref.key}.${col.key}` });
+              out.push({ kind: "column", label: effName(col.name, col.quoted), detail: col.dataType, insertText: identText(col.name, col.quoted), filterText: col.name, score: 0, source: "schema", symbolKey: `col:${ref.key}.${col.key}` });
             }
           }
         }
@@ -1729,12 +1922,26 @@
   function rankCandidates(items, ctx, usageMap) {
     const now = Date.now();
     const DAY = 86400000;
+    // Strip a leading `"` (quoted-identifier context) so filterText matching
+    // isn't skewed by the quote character.
+    const rankPrefix = (ctx.prefix ?? "").replace(/^"/, "").toLowerCase();
+    // Kind relevance per context: in column-ish slots the user is completing a
+    // column, so functions/keywords are secondary; in relation slots tables and
+    // views are equally relevant. Without this, equal scores left ordering to
+    // the alphabetical tiebreaker and `a.` mixed functions above columns.
+    const columnish = ctx.kind === "column" || ctx.kind === "qualified-column" || ctx.kind === "insert-column" || ctx.kind === "insert-value";
+    const kindWeight = (kind) => {
+      if (!columnish) return 1;
+      if (kind === "column") return 1;
+      if (kind === "function") return 0.55;
+      return 0.3; // keywords / others
+    };
     for (const it of items) {
       const usage = usageMap?.get(it.symbolKey);
       const frequency = usage?.frequency ?? 0;
       const lastUsedAt = usage?.lastUsedAt ?? 0;
       const recency = lastUsedAt > 0 ? Math.max(0, 1 - (now - lastUsedAt) / (30 * DAY)) : 0;
-      const prefixMatch = it.filterText.toLowerCase().startsWith(ctx.prefix.toLowerCase()) ? 1 : 0.5;
+      const prefixMatch = it.filterText.toLowerCase().startsWith(rankPrefix) ? 1 : 0.5;
       const isKeyword = it.kind === "keyword" ? 1 : 0;
       const detailBonus = it.detail ? 0.1 : 0;
       const coldStart = frequency === 0 && lastUsedAt === 0;
@@ -1746,10 +1953,11 @@
         // S = 0.40M + 0.20R + 0.15F + 0.10L + 0.10K + 0.05D
         score = 0.40 * prefixMatch + 0.20 * recency + 0.15 * Math.log10(frequency + 1) / 2 + 0.10 * 0.5 + 0.10 * isKeyword + 0.05 * detailBonus;
       }
-      // Stable tiebreaker: alphabetic
-      it.score = score + (1 - it.label.toLowerCase().charCodeAt(0) / 256) * 0.001;
+      // Stable tiebreaker: prefer shorter labels (closer to what was typed —
+      // `actor` over `actor_actor_id_seq`), then alphabetic
+      it.score = (score * kindWeight(it.kind)) + (1 - it.label.toLowerCase().charCodeAt(0) / 256) * 0.001;
     }
-    items.sort((a, b) => b.score - a.score || (a.label < b.label ? -1 : 1));
+    items.sort((a, b) => b.score - a.score || a.label.length - b.label.length || (a.label < b.label ? -1 : 1));
     return items.slice(0, CONFIG.maxCandidates);
   }
 
@@ -2137,6 +2345,7 @@
       "findLastClauseKeyword", "findLastOpenParen", "buildCompletionContext",
       // completion engine
       "generateCandidates", "buildColumnDoc", "rankCandidates",
+      "identNeedsQuote", "quoteIdent", "identInsert", "effName",
       // diagnostics
       "runDiagnostics", "checkParenBalance", "checkUnclosedStrings",
       "checkStatementDiagnostics", "checkClauseOrder", "checkAliasColumns",
@@ -2148,6 +2357,7 @@
       `const CONFIG = ${JSON.stringify({ maxCandidates: CONFIG.maxCandidates, showSystemTables: CONFIG.showSystemTables })};`,
       `const PARSER_VERSION = ${JSON.stringify(PARSER_VERSION)};`,
       `const KEYWORDS = new Set(${JSON.stringify([...KEYWORDS])});`,
+      `const RESERVED_KEYWORDS = new Set(${JSON.stringify([...RESERVED_KEYWORDS])});`,
       `const BUILTIN_FUNCTIONS = ${JSON.stringify(BUILTIN_FUNCTIONS)};`,
       `const COMMON_KEYWORDS = ${JSON.stringify(COMMON_KEYWORDS)};`,
       `const KEYWORD_CHAR_RE = ${KEYWORD_CHAR_RE.toString()};`,
@@ -2595,6 +2805,9 @@
 
   function showCompletionMenu(session, items, from, to) {
     if (!items.length) { hideCompletionMenu(session); return; }
+    // Hidden panel guard: pgAdmin keeps inactive panel iframes alive at 0x0
+    // size; coordsAtPos and viewport clamping produce off-screen menus there.
+    if (!window.innerWidth || !window.innerHeight) { hideCompletionMenu(session); return; }
     const shadow = ensureOverlayHost();
     const root = shadow.querySelector(".pg4-root");
     if (!session.completionMenu) {
@@ -2622,6 +2835,7 @@
       session.completionMenu = menu;
       session.completionActiveIdx = 0;
       session.completionItems = [];
+      wireCompletionDismissal(session);
     }
     const menu = session.completionMenu;
     // Render items
@@ -2710,6 +2924,27 @@
       recordUsage(pg4.state.activeSnapshotId, item.symbolKey).catch(() => {});
     }
     hideCompletionMenu(session);
+  }
+
+  // Dismiss / follow behaviors for the completion menu:
+  //  - click anywhere outside the menu closes it (composedPath crosses shadow DOM)
+  //  - editor scroll or window resize re-anchors the menu to the cursor
+  function wireCompletionDismissal(session) {
+    if (session.__dismissWired) return;
+    session.__dismissWired = true;
+    const menuOpen = () => session.completionMenu && session.completionMenu.style.display !== "none";
+    document.addEventListener("mousedown", (ev) => {
+      if (!menuOpen()) return;
+      const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
+      if (path.includes(session.completionMenu)) return;
+      hideCompletionMenu(session);
+    }, true);
+    const reanchor = () => {
+      if (!menuOpen() || session.completionFrom == null) return;
+      positionCompletionMenu(session, session.completionFrom);
+    };
+    session.view.dom.addEventListener("scroll", reanchor, { passive: true });
+    window.addEventListener("resize", reanchor, { passive: true });
   }
 
   function hideCompletionMenu(session) {
@@ -3060,9 +3295,11 @@
             insertText = "'" + text.replace(/'/g, "''") + "'";
           }
         } else if (slot === "identifier") {
-          // Identifier slot: wrap in double quotes if contains uppercase/space/special
-          if (/[A-Z\s\-]/.test(text) && !/^\d/.test(text)) {
-            insertText = '"' + text.replace(/"/g, '""') + '"';
+          // Identifier slot: wrap in double quotes whenever PostgreSQL would
+          // require it (uppercase / special chars / leading digit / reserved
+          // keyword) — reuse the same rule as completion insertText.
+          if (identNeedsQuote(text)) {
+            insertText = quoteIdent(text);
           }
         }
       }
@@ -3251,7 +3488,15 @@
           return;
         }
         if (!force && CONFIG.completionTriggerMode === "auto") {
-          if (ctx.prefix.length < 2 && ctx.kind !== "qualified-column" && ctx.kind !== "jsonb-path") {
+          // Zero/short prefix is fine right after `.` (alias./schema.) and
+          // JSONB operators — listing ALL members there is the expected UX.
+          if (ctx.prefix.length < 2 && ctx.kind !== "qualified-column" && ctx.kind !== "jsonb-path" && ctx.kind !== "schema-relation") {
+            hideCompletionMenu(session);
+            return;
+          }
+          // Value slots (VALUES (…) / IN (…)) take literals — auto-popup there
+          // is noise; Ctrl+Space can still force it.
+          if (ctx.kind === "insert-value") {
             hideCompletionMenu(session);
             return;
           }
@@ -3616,7 +3861,12 @@
     graph.snapshotId = snapshotId;
     graph.displayName = name;
     graph = await callWorker("parseJsonb", { rawDdl, graph });
-    const index = await callWorker("buildIndex", { graph });
+    // Worker mode returns a structured-clone; the returned graph is the one
+    // carrying `_index`. Re-assign — annotating the worker-side clone and
+    // dropping the return value would leave the main-thread graph unindexed
+    // (completion then yields zero candidates for schema-relation slots).
+    graph = await callWorker("buildIndex", { graph });
+    const index = graph;
     // Persist
     const meta = {
       snapshotId, displayName: name, sourceFileName: sourceFileName ?? "<inline>",
@@ -3828,6 +4078,7 @@
       tokenize, significantTokens, splitStatements,
       parseDdl, parseJsonbAnnotations, buildIndex,
       buildCompletionContext, generateCandidates, runDiagnostics,
+      identNeedsQuote, quoteIdent, identInsert, effName,
       quickDetectDangerSync, stripSqlComments, classifyPasteSlot,
       buildWorkerSource, localCompute, importSnapshotFromText,
     };
