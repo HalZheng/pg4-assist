@@ -153,7 +153,7 @@ window.__pg4Assist.graph         // 当前激活的 schema graph（无快照时�
 window.__pg4Assist.snapshotMeta  // 当前快照元信息
 
 window.__pg4                     // 调试 API
-window.__pg4.version             // 当前版本号，如 "2.1.0"
+window.__pg4.version             // 当前版本号，如 "2.1.1"
 window.__pg4.config              // 当前配置
 window.__pg4.setConfig(patch)
 window.__pg4.importDdlText(text, name, fileName)

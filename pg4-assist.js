@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.1.0";
+  const VERSION = "2.1.1";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1728,16 +1728,22 @@
       .filter((s) => s.length > 0);
 
     if (items.length > 1) {
+      // 多行/多值 → 引号列表：仅当光标确在 IN ( / VALUES ( 列表里才转换，
+      // 其他位置粘贴多行内容一律原样（此前无条件转换会导致意外加引号）
+      if (!inList) return null;
       const joined = items.map(sqlLiteral).join(", ");
-      return { insert: inList ? joined : joined, reason: `${items.length} 个值` };
+      return { insert: joined, reason: `${items.length} 个值` };
     }
 
     const one = items[0];
     if (!one) return null;
     if (NUM_RE.test(one)) return null;
 
-    // 单值：紧跟比较运算符 / IN( / VALUES( 时才自动加引号
-    const wantsLiteral = /(=|<>|!=|<|>|<=|>=|\blike\b|\bilike\b|\bin\b\s*\(|\bvalues\b\s*\(|,)\s*$/i.test(before);
+    // 单值：紧跟比较运算符 / LIKE 时自动加引号；逗号 / IN( / VALUES( 等列表
+    // 上下文仅在 inList（光标确在括号列表内）时触发——避免 SELECT a, 后
+    // 粘贴列名被强加引号
+    const opLiteral = /(=|<>|!=|<|>|<=|>=|\blike\b|\bilike\b)\s*$/i.test(before);
+    const wantsLiteral = opLiteral || (inList && /[(,]\s*$/.test(before));
     const alreadyQuoted = /'\s*$/.test(before);
     if (!wantsLiteral || alreadyQuoted) return null;
     if (UUID_RE.test(one) || DATE_RE.test(one) || /^[^'"]+$/.test(one)) {
