@@ -2,7 +2,7 @@
 
 单文件、无构建、无依赖。适用于**禁止安装浏览器扩展**的公司环境。
 
-- 交付物：[`pg4-assist.js`](pg4-assist.js)（v2.0，3167 行）
+- 交付物：[`pg4-assist.js`](pg4-assist.js)（v2.1，3246 行）
 - 页面技术特征与验证知识库：[`docs/pgAdmin 4 Web 技术特征与验证知识库.md`](docs/pgAdmin%204%20Web%20技术特征与验证知识库.md)（改代码前必读）
 - 旧版实现（v1 snippet、MV3 浏览器扩展）已归档至 [`legacy/`](legacy/)
 

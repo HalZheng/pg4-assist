@@ -153,7 +153,7 @@ window.__pg4Assist.graph         // 当前激活的 schema graph（无快照时�
 window.__pg4Assist.snapshotMeta  // 当前快照元信息
 
 window.__pg4                     // 调试 API
-window.__pg4.version             // "2.0.0"
+window.__pg4.version             // 当前版本号，如 "2.1.0"
 window.__pg4.config              // 当前配置
 window.__pg4.setConfig(patch)
 window.__pg4.importDdlText(text, name, fileName)
@@ -174,7 +174,7 @@ window.__pg4Assist.sessions.size >= 1
 window.__pg4Assist.graph 非空（已导入快照）
 ```
 
-控制台应出现 `PG4 Assist v2.0.0 已启动 · 接管 N 个编辑器`。
+控制台应出现 `PG4 Assist v2.x 已启动 · 接管 N 个编辑器`。
 
 ## 5. 导入 DDL 快照
 

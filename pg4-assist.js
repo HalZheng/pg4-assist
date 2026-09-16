@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.0.0";
+  const VERSION = "2.1.0";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1352,10 +1352,13 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   const SQL_KEYWORD_SUGGESTIONS = [
-    "SELECT", "FROM", "WHERE", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN",
+    "SELECT", "FROM", "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "ON",
     "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "INSERT INTO", "VALUES",
     "UPDATE", "SET", "DELETE FROM", "RETURNING", "DISTINCT", "COUNT(*)", "WITH",
     "UNION ALL", "CASE WHEN", "IS NULL", "IS NOT NULL", "COALESCE", "EXISTS",
+    // 裸关键字必须与组合关键字并列存在：CM6 模糊匹配下，输入 join/on/as 等短词
+    // 会命中 "INNER JOIN"/"CASE WHEN" 等长候选，回车就插入了意料之外的关键字
+    "AS", "AND", "OR", "NOT", "IN", "LIKE",
   ];
 
   /**
@@ -1517,8 +1520,23 @@
     }
 
     // ── 关键字 ───────────────────────────────────────────────────────────
+    // 按子句上下文动态加权：SELECT 列表之后最常写 FROM（列 88 / 函数 40，固定 20 会沉底）；
+    // FROM 之后常接 JOIN / WHERE
+    const kwBoost = (k) => {
+      if (info.clause === "select" && k === "FROM") return 92;
+      if (info.clause === "from" && (k === "JOIN" || k === "INNER JOIN" || k === "LEFT JOIN" || k === "WHERE")) return 92;
+      return 20;
+    };
+    // CM6 匹配分对大小写折叠罚 -200（例：输入 fro 时 label "FROM" 得 -304，而列
+    // from_stage 前缀匹配得 -100，boost 差无法弥补）。因此关键字 label 跟随用户
+    // 输入的大小写（小写输入 → 小写 label → 前缀匹配），displayLabel 固定大写显示。
+    const kwLower = info.typed !== "" && !/[A-Z]/.test(info.typed);
     for (const k of SQL_KEYWORD_SUGGESTIONS) {
-      out.push({ label: k, kind: "keyword", detail: "关键字", insert: k, boost: 20, docKind: "keyword" });
+      out.push({
+        label: kwLower ? k.toLowerCase() : k,
+        displayLabel: k,
+        kind: "keyword", detail: "关键字", insert: k, boost: kwBoost(k), docKind: "keyword",
+      });
     }
 
     return finish(out, cfg);
@@ -1822,6 +1840,19 @@
   // §11  编辑器接管
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /** Ctrl + ` ：切换离线补全开关（编辑器内经 domEventHandlers，页面其他位置经顶层 document） */
+  function isToggleCompletionKey(ev) {
+    return !ev.repeat && ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey && ev.key === "`";
+  }
+
+  function toggleCompletion(core, M, view) {
+    if (!core || core.disposed) return;
+    const next = !currentConfig.completionEnabled;
+    core.setConfig({ completionEnabled: next });
+    try { if (!next && M && view) M.autocomplete.closeCompletion(view); } catch { /* ignore */ }
+    core.toast(next ? "补全已开启（Ctrl + `）" : "补全已关闭（Ctrl + `）");
+  }
+
   const BASE_THEME_SPEC = {
     ".pg4-diag-error": {
       textDecoration: "underline wavy #e5534b",
@@ -1908,9 +1939,13 @@
 
     const handlers = V.EditorView.domEventHandlers({
       paste: (ev, v) => (slot.session ? slot.session.onPaste(ev, v) : false),
-      keydown: (ev) => {
+      keydown: (ev, v) => {
         const s = slot.session;
         if (s && ev.key === "Escape") s.suppressAutoUntil = Date.now() + 1200;
+        if (isToggleCompletionKey(ev)) {
+          ev.preventDefault();
+          toggleCompletion(s && s.core, M, v);
+        }
         return false;
       },
     });
@@ -2040,6 +2075,7 @@
       const self = this;
       const options = cands.map((c) => ({
         label: c.label,
+        displayLabel: c.displayLabel,
         type: c.kind,
         detail: c.detail,
         boost: Math.max(-99, Math.min(99, c.boost)),
@@ -2066,6 +2102,9 @@
         from: info.from,
         options,
         validFor: /^[A-Za-z0-9_$\u0080-\uffff]*$/,
+        // 带 displayLabel 的候选（关键字大小写规整）若不提供 getMatch 会丢失高亮；
+        // displayLabel 与 label 等长，直接透传 CM6 算好的匹配区间即可
+        getMatch: (_c, m) => m,
       };
     }
 
@@ -2352,6 +2391,11 @@
 }
 .fab:hover { background: #3b7ef5; }
 .fab.idle { background: #6b7280; }
+/* 补全已关闭（Ctrl+反引号快捷键）：空心虚线球，与 idle（无快照，实心灰）区分 */
+.fab.off {
+  background: transparent; border: 2px dashed #6b7280; color: #6b7280; box-shadow: none;
+}
+.fab.off:hover { background: rgba(107, 114, 128, .15); }
 .fab .badge {
   position: absolute; top: -4px; right: -4px; min-width: 17px; height: 17px; padding: 0 4px;
   border-radius: 9px; background: #e5534b; color: #fff; font-size: 10px; line-height: 17px; text-align: center;
@@ -2462,6 +2506,12 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       this.root = root;
       doc.documentElement.appendChild(host);
       this.host = host;
+
+      // 点击面板/FAB 之外的任意位置收起面板（iframe 内的点击由 Core.attachWindow 另行监听）
+      this._outsideDown = (ev) => {
+        if (this.open && !ev.composedPath().includes(this.host)) this.toggle(false);
+      };
+      doc.addEventListener("pointerdown", this._outsideDown, true);
     }
 
     toggle(force) {
@@ -2482,9 +2532,11 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       const core = this.core;
       const n = core.totalDiagnostics();
       this.fab.classList.toggle("idle", !core.graph);
-      this.fab.title = core.graph
+      this.fab.classList.toggle("off", !currentConfig.completionEnabled);
+      this.fab.title = (core.graph
         ? `PG4 Assist — ${core.snapshotMeta ? core.snapshotMeta.name : "?"} · ${core.sessions.size} 个编辑器`
-        : "PG4 Assist — 未加载快照，点击导入 DDL";
+        : "PG4 Assist — 未加载快照，点击导入 DDL")
+        + (currentConfig.completionEnabled ? "" : " · 补全已关闭（Ctrl + ` 开启）");
       let badge = this.fab.querySelector(".badge");
       if (n > 0) {
         if (!badge) { badge = document.createElement("span"); badge.className = "badge"; this.fab.appendChild(badge); }
@@ -2907,6 +2959,17 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       let contents;
       try { contents = win.document.querySelectorAll(".cm-content"); } catch { return 0; }
       if (contents.length) installHistoryHook(win, this);
+      // iframe 内点击（不会冒泡到顶层 document）→ 收起顶层控制面板。
+      // 仅子 frame：顶层的面板/FAB 点击由 Panel._outsideDown 处理（需排除 host 自身）。
+      // 与 watchFrameLoad 同款模式：监听器不捕获 core，每次从顶层取当前实例，
+      // 脚本重跑后遗留监听器自动指向新实例（因此 destroy 无需清理）
+      if (win !== window && !win.__pg4PanelOutside) {
+        win.__pg4PanelOutside = true;
+        win.document.addEventListener("pointerdown", () => {
+          const core = window[NS];
+          if (core && !core.disposed && core.panel && core.panel.open) core.panel.toggle(false);
+        }, true);
+      }
       for (const el of contents) {
         if (el.__pg4Session && this.sessions.has(el.__pg4Session)) continue;
         const cmView = el.cmView;
@@ -2994,6 +3057,16 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
         this.attachAll();
       }, 4000);
 
+      // 焦点不在编辑器（如面板/页面）时也能用 Ctrl + ` 切换补全；
+      // 编辑器内的按键由 domEventHandlers 覆盖（iframe 内按键不冒泡到顶层）
+      this._topKeydown = (ev) => {
+        if (isToggleCompletionKey(ev)) {
+          ev.preventDefault();
+          toggleCompletion(this, null, null);
+        }
+      };
+      document.addEventListener("keydown", this._topKeydown);
+
       await this.restoreActiveSnapshot().catch((e) => warn("恢复快照失败", e));
       this.panel.updateFab();
       log(`PG4 Assist v${VERSION} 已启动 · 接管 ${this.sessions.size} 个编辑器 · 快照 ${this.snapshotMeta ? this.snapshotMeta.name : "（无）"}`);
@@ -3005,6 +3078,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
     destroy() {
       this.disposed = true;
       clearInterval(this._poll);
+      document.removeEventListener("keydown", this._topKeydown);
       for (const { mo, win } of this.observers) {
         try { mo.disconnect(); } catch { /* ignore */ }
         try { delete win.__pg4Observer; } catch { /* ignore */ }
@@ -3013,7 +3087,12 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       const wins = new Set([window, ...[...this.sessions.values()].map((s) => s.win)]);
       for (const s of this.sessions.values()) s.destroy();
       this.sessions.clear();
-      for (const w of wins) { try { w.__pg4HistoryUnhook && w.__pg4HistoryUnhook(); } catch { /* ignore */ } }
+      for (const w of wins) {
+        try { w.__pg4HistoryUnhook && w.__pg4HistoryUnhook(); } catch { /* ignore */ }
+      }
+      if (this.panel) {
+        try { document.removeEventListener("pointerdown", this.panel._outsideDown, true); } catch { /* ignore */ }
+      }
       try { this.panel.host.remove(); } catch { /* ignore */ }
       try { this.channel && this.channel.close(); } catch { /* ignore */ }
       delete window[NS];

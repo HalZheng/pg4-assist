@@ -9,7 +9,7 @@
 以 DevTools Snippet / 用户脚本 / Local Overrides 形式注入，适用于禁止安装浏览器扩展的环境。
 
 - 不修改 pgAdmin 后端、不创建数据库连接、不外发任何数据（离线优先）。
-- 当前交付物：`pg4-assist.js`（v2，约 3100 行，IIFE 单文件）。
+- 当前交付物：`pg4-assist.js`（v2，约 3200 行，IIFE 单文件）。
 - 旧实现（MV3 扩展、v1 自建 UI snippet）已归档至 `legacy/`，不要在那里加新功能。
 
 ## 快速开始
