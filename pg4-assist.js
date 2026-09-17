@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.1.1";
+  const VERSION = "2.2.3";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -56,6 +56,9 @@
     diagMissingWhere: true,
 
     smartPasteEnabled: true,
+
+    /** 结果网格复制单单元格时自动去除外层双引号 */
+    gridUnquoteSingleCell: true,
 
     historyEnabled: true,
     historyRetentionDays: 30,
@@ -1717,6 +1720,8 @@
     if (!raw.trim()) return null;
     // 已经像 SQL 就别动
     if (/\b(select|insert|update|delete|create|alter|drop|with)\b/i.test(raw)) return null;
+    // 已经是 IN (...) / 元组列表，不要再拆开加引号
+    if (/^\s*\([\s\S]*\)\s*$/.test(raw)) return null;
 
     const before = docText.slice(Math.max(0, pos - 400), pos);
     // 光标是否在 IN ( … ) 里
@@ -2292,6 +2297,471 @@
     };
   }
 
+  /**
+   * 数据网格复制钩子：
+   * 1. 拦截 pgAdmin Webpack 中的 CsvHelper (copyRowsToCsv)，当复制单个单元格且未带表头时，
+   *    将去除 CSV 引号包装的原始纯文本写入剪贴板（避免如 "hello" 复制为带外层双引号）。
+   * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
+   */
+  const GRID_HOOK_REV = 6;
+
+  function installGridCopyHook(win) {
+    if (win.__pg4GridCopyHook === GRID_HOOK_REV) return;
+    if (win.__pg4GridCopyUnhook) {
+      try { win.__pg4GridCopyUnhook(); } catch { /* ignore */ }
+    }
+    const req = grabWebpackRequire(win);
+    if (!req || !req.m) return;
+
+    // 寻找 CsvHelper 模块 (包含 copyRowsToCsv 与 stringQuoteCell)
+    let csvHelperId = null;
+    for (const id of Object.keys(req.m)) {
+      const src = String(req.m[id]);
+      if (src.includes("copyRowsToCsv") && src.includes("stringQuoteCell")) {
+        csvHelperId = id;
+        break;
+      }
+    }
+
+    let unhookProto = null;
+    if (csvHelperId) {
+      try {
+        const mod = req(csvHelperId);
+        const CsvClass = mod && (mod.default || mod);
+        if (CsvClass && CsvClass.prototype && typeof CsvClass.prototype.copyRowsToCsv === "function") {
+          const proto = CsvClass.prototype;
+          if (!proto.__pg4OrigCopy) {
+            proto.__pg4OrigCopy = proto.copyRowsToCsv;
+            proto.copyRowsToCsv = function (rows = [], cols = [], withHeaders = false) {
+              if (currentConfig.gridUnquoteSingleCell && !withHeaders && rows.length === 1 && cols.length === 1) {
+                const rawVal = rows[0][cols[0].key];
+                let text = "";
+                if (rawVal === null || rawVal === undefined) {
+                  text = "";
+                } else if (typeof rawVal === "object") {
+                  text = JSON.stringify(rawVal);
+                } else {
+                  text = String(rawVal);
+                }
+                if (win.navigator && win.navigator.clipboard && win.navigator.clipboard.writeText) {
+                  win.navigator.clipboard.writeText(text);
+                }
+                try {
+                  win.localStorage.setItem("copied-with-headers", withHeaders);
+                  win.localStorage.setItem("copied-rows", JSON.stringify(rows));
+                } catch { /* ignore */ }
+                return;
+              }
+              return proto.__pg4OrigCopy.apply(this, arguments);
+            };
+            unhookProto = () => {
+              if (proto.__pg4OrigCopy) {
+                proto.copyRowsToCsv = proto.__pg4OrigCopy;
+                delete proto.__pg4OrigCopy;
+              }
+            };
+          }
+        }
+      } catch (e) {
+        dbg("CsvHelper hook 失败", e);
+      }
+    }
+
+    function findCopyButton(doc, titles) {
+      return Array.from(doc.querySelectorAll("button")).find((b) => {
+        const t = b.getAttribute("title") || b.getAttribute("aria-label") || "";
+        return titles.some((x) => t === x || t.toLowerCase() === x.toLowerCase() || t.includes(x));
+      });
+    }
+
+    // 补丁键盘快捷键：当焦点在结果网格单元格上按 Ctrl+C / Cmd+C 时，触发复制操作
+    const onKeydown = (ev) => {
+      const doc = win.document;
+      if (!doc) return;
+      if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === "c" || ev.key === "C")) {
+        const inBtn = doc.querySelector(".pg4-copy-in-btn");
+        if (inBtn && !inBtn.disabled) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          copySelectionAsIn(doc);
+          return;
+        }
+      }
+      if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === "c" || ev.key === "C")) {
+        const cell = doc.activeElement && doc.activeElement.closest(".rdg-cell[role='gridcell']");
+        if (cell) {
+          const copyBtn = findCopyButton(doc, ["复制", "Copy"]);
+          if (copyBtn) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            copyBtn.click();
+          }
+        }
+      }
+    };
+
+    /**
+     * 从 ResultSet Fiber hooks 提取当前选区。
+     * 优先级与 pgAdmin COPY_DATA 一致：整行 Set → 整列 Set → 矩形 range → 单单元格。
+     */
+    function extractGridSelection(doc) {
+      let rowsState = null, colsState = null, cellRef = null;
+      try {
+        const grid = doc.querySelector(".rdg");
+        if (!grid) return extractGridSelectionFromDom(doc, null, null);
+        const fiberKey = Object.keys(grid).find((k) => k.startsWith("__reactFiber"));
+        let cur = fiberKey ? grid[fiberKey] : null;
+
+        while (cur) {
+          let s = cur.memoizedState;
+          let setCount = 0;
+          let total = 0;
+          while (s) {
+            if (s.memoizedState instanceof Set) setCount++;
+            s = s.next;
+            total++;
+          }
+          if (setCount >= 2 && total > 15) break;
+          cur = cur.return;
+        }
+
+        if (cur) {
+          let selectedRowsSet = null, selectedColsSet = null, rangeRef = null, clientPK = "__temp_PK";
+          let s = cur.memoizedState;
+          let hookIdx = 0;
+          while (s) {
+            const ms = s.memoizedState;
+            if (hookIdx === 4 && Array.isArray(ms)) rowsState = ms;
+            if (hookIdx === 5 && Array.isArray(ms)) colsState = ms;
+            if (hookIdx === 6 && ms && typeof ms === "object" && ms.current && ms.current.clientPK) {
+              clientPK = ms.current.clientPK;
+            }
+            if (hookIdx === 8 && ms instanceof Set) selectedRowsSet = ms;
+            if (hookIdx === 9 && ms instanceof Set) selectedColsSet = ms;
+            if (hookIdx === 12 && ms && typeof ms === "object" && ms !== null && "current" in ms) cellRef = ms.current;
+            if (hookIdx === 13 && ms && typeof ms === "object" && ms !== null && "current" in ms) rangeRef = ms.current;
+            s = s.next;
+            hookIdx++;
+          }
+          if (rowsState && colsState) {
+            if (selectedRowsSet && selectedRowsSet.size > 0) {
+              const rows = rowsState.filter((r) => selectedRowsSet.has(r[clientPK]));
+              if (rows.length) return { kind: "rows", rows, cols: colsState };
+            }
+            if (selectedColsSet && selectedColsSet.size > 0) {
+              const cols = colsState.filter((_, idx) => (
+                selectedColsSet.has(idx) || selectedColsSet.has(idx + 1) || selectedColsSet.has(idx + 2)
+              ));
+              if (cols.length) return { kind: "cols", rows: rowsState, cols };
+            }
+            if (rangeRef && rangeRef.startColumnIdx != null) {
+              const minCol = Math.min(rangeRef.startColumnIdx, rangeRef.endColumnIdx);
+              const maxCol = Math.max(rangeRef.startColumnIdx, rangeRef.endColumnIdx);
+              const minRow = Math.min(rangeRef.startRowIdx, rangeRef.endRowIdx);
+              const maxRow = Math.max(rangeRef.startRowIdx, rangeRef.endRowIdx);
+              const cols = colsState.filter((_, idx) => (idx + 1) >= minCol && (idx + 1) <= maxCol);
+              const rows = rowsState.slice(minRow, maxRow + 1);
+              if (rows.length && cols.length) return { kind: "range", rows, cols };
+            }
+          }
+        }
+      } catch (e) {
+        dbg("extractGridSelection fiber", e);
+      }
+      const fromDom = extractGridSelectionFromDom(doc, rowsState, colsState);
+      if (fromDom) return fromDom;
+      if (Array.isArray(cellRef) && cellRef[0] && cellRef[1]) {
+        return { kind: "cell", rows: [cellRef[0]], cols: [cellRef[1]] };
+      }
+      return null;
+    }
+
+    function cellDisplayValue(el) {
+      const raw = (el.textContent || "").trim();
+      if (raw === "[null]" || raw === "") return null;
+      return raw;
+    }
+
+    function extractGridSelectionFromDom(doc, rowsState, colsState) {
+      const grid = doc.querySelector(".rdg");
+      if (!grid) return null;
+
+      const selectedHeaders = Array.from(grid.querySelectorAll('.rdg-cell[role="columnheader"][aria-selected="true"]'));
+      if (selectedHeaders.length) {
+        const colIdxs = selectedHeaders.map((h) => Number(h.getAttribute("aria-colindex"))).filter(Boolean);
+        const cols = colIdxs.map((idx) => {
+          const fromState = colsState && colsState[idx - 2];
+          if (fromState) return fromState;
+          const header = selectedHeaders.find((h) => Number(h.getAttribute("aria-colindex")) === idx);
+          const name = ((header && header.textContent) || "").trim().split("\n")[0] || ("col" + idx);
+          return { key: name, name, type: "text", cell: "string", __colIndex: idx };
+        });
+        const dataRows = Array.from(grid.querySelectorAll('.rdg-row[role="row"]')).filter((r) => r.querySelector('.rdg-cell[role="gridcell"]'));
+        const rows = dataRows.map((rowEl, i) => {
+          const obj = rowsState && rowsState[i] ? { ...rowsState[i] } : {};
+          cols.forEach((c, ci) => {
+            const idx = colIdxs[ci];
+            const cell = rowEl.querySelector(`.rdg-cell[role="gridcell"][aria-colindex="${idx}"]`);
+            if (cell && (obj[c.key] === undefined)) obj[c.key] = cellDisplayValue(cell);
+          });
+          return obj;
+        });
+        if (rows.length && cols.length) return { kind: "cols", rows, cols };
+      }
+
+      const selectedRows = Array.from(grid.querySelectorAll('.rdg-row[role="row"][aria-selected="true"]'));
+      if (selectedRows.length && colsState && colsState.length) {
+        const rows = selectedRows.map((rowEl) => {
+          const obj = {};
+          colsState.forEach((c, i) => {
+            const cell = rowEl.querySelector(`.rdg-cell[role="gridcell"][aria-colindex="${i + 2}"]`);
+            obj[c.key] = cell ? cellDisplayValue(cell) : null;
+          });
+          return obj;
+        });
+        return { kind: "rows", rows, cols: colsState };
+      }
+
+      const selectedCells = Array.from(grid.querySelectorAll('.rdg-cell[role="gridcell"][aria-selected="true"]'));
+      if (!selectedCells.length) return null;
+      const colIdxs = [...new Set(selectedCells.map((c) => Number(c.getAttribute("aria-colindex"))))].filter(Boolean).sort((a, b) => a - b);
+      const rowEls = [...new Set(selectedCells.map((c) => c.closest('.rdg-row[role="row"]')))].filter(Boolean);
+      const cols = colIdxs.map((idx) => {
+        const fromState = colsState && colsState[idx - 2];
+        if (fromState) return fromState;
+        const header = grid.querySelector(`.rdg-cell[role="columnheader"][aria-colindex="${idx}"]`);
+        const name = ((header && header.textContent) || "").trim().split("\n")[0] || ("c" + idx);
+        return { key: name, name, type: "text", cell: "string" };
+      });
+      const rows = rowEls.map((rowEl) => {
+        const obj = {};
+        cols.forEach((c, ci) => {
+          const idx = colIdxs[ci];
+          const cell = rowEl.querySelector(`.rdg-cell[role="gridcell"][aria-colindex="${idx}"]`);
+          obj[c.key] = cell ? cellDisplayValue(cell) : null;
+        });
+        return obj;
+      });
+      if (rows.length && cols.length) return { kind: "range", rows, cols };
+      return null;
+    }
+
+    function isNumericColumn(col) {
+      const t = (col.type || col.cell || "").toLowerCase();
+      return /int|float|double|num|real|decimal|serial/i.test(t);
+    }
+
+    function formatAsInClause(rows, cols) {
+      if (!rows || !rows.length || !cols || !cols.length) return null;
+      if (cols.length === 1) {
+        const col = cols[0];
+        const isNum = isNumericColumn(col);
+        const items = rows.map((r) => {
+          const val = r[col.key];
+          if (val === null || val === undefined) return "NULL";
+          if (isNum && !isNaN(Number(val)) && String(val).trim() !== "") return String(val).trim();
+          return `'${String(val).replace(/'/g, "''")}'`;
+        });
+        return `(${items.join(", ")})`;
+      } else {
+        const items = rows.map((r) => {
+          const rowVals = cols.map((c) => {
+            const val = r[c.key];
+            if (val === null || val === undefined) return "NULL";
+            if (isNumericColumn(c) && !isNaN(Number(val)) && String(val).trim() !== "") return String(val).trim();
+            return `'${String(val).replace(/'/g, "''")}'`;
+          });
+          return `(${rowVals.join(", ")})`;
+        });
+        return `(${items.join(", ")})`;
+      }
+    }
+
+    function writeClipboard(text) {
+      let ok = false;
+      try {
+        const ta = win.document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;z-index:2147483647";
+        win.document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, text.length);
+        ok = !!win.document.execCommand("copy");
+        ta.remove();
+      } catch {
+        ok = false;
+      }
+      try {
+        if (win.navigator && win.navigator.clipboard && win.navigator.clipboard.writeText) {
+          win.navigator.clipboard.writeText(text);
+        }
+      } catch { /* ignore */ }
+      return ok;
+    }
+
+    function copySelectionAsIn(doc) {
+      let selData = null;
+      try { selData = extractGridSelection(doc); } catch (e) { dbg("extractGridSelection", e); }
+      if (!selData || !selData.rows.length || !selData.cols.length) {
+        const core = window[NS];
+        if (core) core.toast("请先选中结果网格中的单元格 / 列 / 行");
+        return false;
+      }
+      const text = formatAsInClause(selData.rows, selData.cols);
+      if (!text) return false;
+      if (writeClipboard(text)) {
+        const core = window[NS];
+        if (core) core.toast(`已复制 IN 条件（${selData.rows.length} 项）`);
+        return true;
+      }
+      const core = window[NS];
+      if (core) core.toast("复制失败：浏览器未允许写入剪贴板");
+      return false;
+    }
+
+    let activeMenu = null;
+    const hideMenu = () => {
+      if (activeMenu) {
+        activeMenu.remove();
+        activeMenu = null;
+      }
+    };
+
+    function showInMenu(doc, x, y) {
+      const selData = extractGridSelection(doc);
+      if (!selData || !selData.rows.length || !selData.cols.length) return;
+      hideMenu();
+
+      const menu = doc.createElement("div");
+      menu.className = "pg4-grid-context-menu";
+      menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:999999;background:var(--color-bg,#fff);color:var(--color-fg,#212121);border:1px solid rgba(127,127,127,.3);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.2);padding:4px 0;min-width:180px;font-size:12px;font-family:inherit;user-select:none;`;
+
+      const itemIn = doc.createElement("div");
+      itemIn.style.cssText = "padding:7px 14px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:background .15s;";
+      const colLabel = selData.cols.length === 1 ? escapeHtml(selData.cols[0].name || selData.cols[0].key) : `${selData.cols.length} 列`;
+      itemIn.innerHTML = `<span>复制为 <b>IN (...)</b> 条件</span><span style="opacity:.6;font-size:11px;margin-left:8px">${selData.rows.length} 项 · ${colLabel}</span>`;
+      itemIn.onmouseenter = () => { itemIn.style.background = "rgba(127,127,127,.15)"; };
+      itemIn.onmouseleave = () => { itemIn.style.background = "transparent"; };
+      itemIn.onclick = () => {
+        copySelectionAsIn(doc);
+        hideMenu();
+      };
+      menu.appendChild(itemIn);
+      doc.body.appendChild(menu);
+      activeMenu = menu;
+
+      const r = menu.getBoundingClientRect();
+      if (r.right > win.innerWidth) menu.style.left = `${Math.max(0, win.innerWidth - r.width - 8)}px`;
+      if (r.bottom > win.innerHeight) menu.style.top = `${Math.max(0, win.innerHeight - r.height - 8)}px`;
+    }
+
+    // 右键 mousedown 会走 react-data-grid 的选中逻辑，把框选 / 整列收成单格。
+    // 只 stopPropagation（不要 preventDefault，否则 Chrome 可能不再派发 contextmenu）。
+    function eventEl(ev) {
+      const t = ev && ev.target;
+      if (!t) return null;
+      return t.nodeType === 1 ? t : t.parentElement;
+    }
+
+    const onGridMouseDown = (ev) => {
+      if (ev.button !== 2) return;
+      const t = eventEl(ev);
+      if (t && t.closest && t.closest(".rdg-cell")) ev.stopPropagation();
+    };
+
+    const onContextMenu = (ev) => {
+      const doc = win.document;
+      if (!doc) return;
+      const t = eventEl(ev);
+      const cell = t && t.closest && t.closest(".rdg-cell");
+      if (!cell) {
+        hideMenu();
+        return;
+      }
+      const selData = extractGridSelection(doc);
+      if (!selData || !selData.rows.length || !selData.cols.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      showInMenu(doc, ev.clientX, ev.clientY);
+    };
+
+    function ensureInToolbarButton(doc) {
+      if (!doc.querySelector(".rdg")) return;
+      if (doc.querySelector(".pg4-copy-in-btn")) return;
+      const copyBtn = findCopyButton(doc, ["复制", "Copy"]);
+      if (!copyBtn) return;
+      const group = copyBtn.closest(".MuiButtonGroup-root");
+      if (!group) return;
+      const copyOptBtn = findCopyButton(doc, ["复制选项", "Copy options"]);
+      const inBtn = doc.createElement("button");
+      inBtn.type = "button";
+      inBtn.className = (copyBtn.className || "") + " pg4-copy-in-btn";
+      inBtn.title = "复制为 IN 条件 (Ctrl+Shift+C)";
+      inBtn.setAttribute("aria-label", "复制为 IN 条件");
+      inBtn.style.fontWeight = "700";
+      inBtn.style.fontSize = "11px";
+      inBtn.style.minWidth = "32px";
+      inBtn.textContent = "IN";
+      inBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        copySelectionAsIn(win.document);
+      };
+      if (copyOptBtn && copyOptBtn.parentNode === group) {
+        group.insertBefore(inBtn, copyOptBtn.nextSibling);
+      } else {
+        group.appendChild(inBtn);
+      }
+    }
+
+    let toolbarObserver = null;
+    const syncToolbar = () => {
+      try { ensureInToolbarButton(win.document); } catch { /* ignore */ }
+    };
+
+    const onDocClick = (ev) => {
+      const el = ev.target && (ev.target.nodeType === 1 ? ev.target : ev.target.parentElement);
+      const btn = el && el.closest && el.closest(".pg4-copy-in-btn");
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      copySelectionAsIn(win.document);
+    };
+
+    try {
+      win.addEventListener("keydown", onKeydown, true);
+      win.addEventListener("mousedown", onGridMouseDown, true);
+      win.addEventListener("contextmenu", onContextMenu, true);
+      win.addEventListener("click", onDocClick, true);
+      win.addEventListener("pointerdown", (e) => {
+        if (activeMenu && !activeMenu.contains(e.target)) hideMenu();
+      }, true);
+      syncToolbar();
+      if (win.document && win.document.body) {
+        toolbarObserver = new win.MutationObserver(debounce(syncToolbar, 250));
+        toolbarObserver.observe(win.document.body, { childList: true, subtree: true });
+      }
+    } catch { /* ignore */ }
+
+    win.__pg4GridCopyHook = GRID_HOOK_REV;
+    win.__pg4GridCopyUnhook = () => {
+      try {
+        win.removeEventListener("keydown", onKeydown, true);
+        win.removeEventListener("mousedown", onGridMouseDown, true);
+        win.removeEventListener("contextmenu", onContextMenu, true);
+        win.removeEventListener("click", onDocClick, true);
+        hideMenu();
+        if (toolbarObserver) toolbarObserver.disconnect();
+        const leftover = win.document && win.document.querySelectorAll(".pg4-copy-in-btn");
+        leftover && leftover.forEach((el) => el.remove());
+      } catch { /* ignore */ }
+      if (unhookProto) unhookProto();
+      win.__pg4GridCopyHook = false;
+    };
+  }
+
   function detectDatabaseName(win) {
     try {
       const u = new URL(win.location.href);
@@ -2683,6 +3153,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
         </div>
         <div class="sec"><h3>其他</h3>
           ${chk("smartPasteEnabled", "智能粘贴（自动加单引号 / 转 IN 列表）")}
+          ${chk("gridUnquoteSingleCell", "结果单元格复制自动去外层双引号", "单选单元格复制时保留纯净数据，避免意外带上 CSV 双引号")}
           ${chk("historyEnabled", "记录查询历史（观察 pgAdmin 执行上报）")}
           ${chk("debug", "调试日志")}
         </div>
@@ -2964,7 +3435,10 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       let added = 0;
       let contents;
       try { contents = win.document.querySelectorAll(".cm-content"); } catch { return 0; }
-      if (contents.length) installHistoryHook(win, this);
+      if (contents.length) {
+        installHistoryHook(win, this);
+        installGridCopyHook(win);
+      }
       // iframe 内点击（不会冒泡到顶层 document）→ 收起顶层控制面板。
       // 仅子 frame：顶层的面板/FAB 点击由 Panel._outsideDown 处理（需排除 host 自身）。
       // 与 watchFrameLoad 同款模式：监听器不捕获 core，每次从顶层取当前实例，
@@ -3095,6 +3569,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       this.sessions.clear();
       for (const w of wins) {
         try { w.__pg4HistoryUnhook && w.__pg4HistoryUnhook(); } catch { /* ignore */ }
+        try { w.__pg4GridCopyUnhook && w.__pg4GridCopyUnhook(); } catch { /* ignore */ }
       }
       if (this.panel) {
         try { document.removeEventListener("pointerdown", this.panel._outsideDown, true); } catch { /* ignore */ }

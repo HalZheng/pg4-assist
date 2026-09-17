@@ -313,23 +313,50 @@ v2 的验证分两层：
 
 ## 11. 增量记录新技术事实
 
-后续发现 pgAdmin 4 的新页面结构或运行时行为时，按以下格式追加记录：
+### 11.1 数据输出网格（React Data Grid）复制机制与键盘缺陷（2026-09-17）
 
 ```text
-发现日期：YYYY-MM-DD
-pgAdmin 版本或构建：<可见版本、部署信息或未知>
-页面/功能：<例如 Query Tool、对象浏览器、结果面板>
-观察条件：<URL、frame、操作步骤和前置状态>
-观察结果：<DOM、事件、对象或控制台证据>
-对增强功能的影响：<可利用的接口、兼容性风险或降级策略>
-验证方式：<手工步骤、纯函数断言或真实站点>
+发现日期：2026-09-17
+pgAdmin 版本或构建：pgAdmin 4 v8.11 / v9.x（React 18 + React Data Grid v7-beta + Szh-menu）
+页面/功能：Query Tool 下半部数据输出网格（.rdg / .rdg-cell[role="gridcell"]）
+观察条件：执行 SQL 产出结果集，选中单个或多个单元格，分别点击工具栏「复制」按钮或按 Ctrl+C / Cmd+C。
+观察结果：
+  1. 结果网格基于 react-data-grid（类名 .rdg），复制数据由 Webpack 模块中的 CsvHelper 类（包含 copyRowsToCsv / stringQuoteCell）处理。
+  2. 复制单单元格时，pgAdmin 默认当作单行单列 CSV 导出，会执行 stringQuoteCell，使字符串强制加上两端双引号并转义内部双引号（例如 hello world -> "hello world"）。
+  3. pgAdmin 自身快捷键存在 bug：单单元格选中时，Row 组件内部 handleShortcuts 只传了一个参数（缺少 isGridFocus 标志），导致在单元格上按 Ctrl+C 无法命中 copy 操作。
+  4. 多行/多列复制，或使用「与标题一起复制」时，符合标准 CSV 规范，应当保留引号和分隔符。
+对增强功能的影响：
+  - 通过 Webpack 提取 CsvHelper，装饰原型方法 copyRowsToCsv：当 !withHeaders && rows.length === 1 && cols.length === 1 时，直接提取单元格原始值写入剪贴板，彻底清除外层冗余双引号。
+  - 在 Query Tool frame 上补齐全局 capture keydown 监听，当 activeElement 是 .rdg-cell 且按下 Ctrl+C 时，自动触发复制，修复 pgAdmin 原生键盘无法复制单单元格的体验缺陷。
+验证方式：真实站点执行 SELECT 1 AS id, 'hello world' AS val, 'quoted "inside"' AS msg; 分别以工具栏按钮与键盘 Ctrl+C 复制，验证剪贴板写入纯净文本。
 ```
 
-记录技术事实时区分三类结论：
+### 11.2 数据输出网格右键「复制为 IN 条件」扩展（2026-09-17）
 
-1. **稳定事实**：多个版本或多个部署环境均观察到的行为，可作为实现依据。
-2. **当前构建事实**：只在某个 pgAdmin 构建中确认，必须附版本或证据，不能直接泛化。
-3. **待验证假设**：由页面结构或错误日志推测，不能作为功能通过标准。
+```text
+发现日期：2026-09-17
+pgAdmin 版本或构建：pgAdmin 4 v8.11 / v9.x（React Data Grid v7-beta）
+页面/功能：Query Tool 下半部数据输出网格（.rdg / .rdg-cell[role="gridcell"]）
+观察条件：
+  1. 结果网格区域未注册任何 contextmenu 原生事件，右键点击默认弹出浏览器自带菜单（检查元素、查看源代码等）。
+  2. 选区状态挂在 RDG 的父级 React Fiber hooks 链中：
+     - 单单元格选中：hook 12（$.current）包含 [rowObj, colObj]。
+     - 框选范围（Range）：hook 13（X.current）包含 startColumnIdx, endColumnIdx, startRowIdx, endRowIdx。
+     - 数据行/列列表：hook 4（rowsState）与 hook 5（colsState）。
+对增强功能的影响：
+  - 在 frame 上监听 contextmenu 捕获阶段，判断如果右键触发在 .rdg-cell 单元格内，拦截原生右键菜单，并从 Fiber 选区提取选中的行列数据。
+  - 格式化逻辑：
+    * 单列：识别字段类型（int/float/decimal/numeric 等数值类型保持纯数字，其余 uuid/varchar/text/timestamptz 等字符串加单引号转义，NULL 统一为大写 NULL），生成 ('val1', 'val2', ...)。
+    * 多列：自动生成多列组合元组形式 ((val1_a, val1_b), (val2_a, val2_b))。
+  - 弹出原生的轻量浮层菜单项，点击直接将 IN 条件写入剪贴板，并触发轻提示（Toast）。
+验证方式：在真实表 AccountClosure 上分别框选 UUID、整数列及多列组合，右键复制并校验剪贴板内容。
+补充（2026-09-17 晚）：
+  1. 右键 mousedown 会走 react-data-grid 选中逻辑，把已有框选 / 整列收成单格。捕获阶段只 stopPropagation、不 preventDefault，才能既保住选区又弹出 contextmenu。
+  2. 点列头整列时选区在 ResultSet 的 selectedColumns Set（hook 9），不是 range / 单单元格；提取优先级必须与 COPY_DATA 一致：整行 Set → 整列 Set → range → 单格，失败再走 DOM（columnheader[aria-selected=true] / gridcell[aria-selected=true]）。
+  3. 更稳入口：结果工具栏「复制选项」旁增加 IN 按钮（Ctrl+Shift+C），不依赖右键，不改变选区。
+  4. iframe 里 `navigator.clipboard.writeText` 常因文档未聚焦而异步失败；点 IN 后系统剪贴板仍空。
+     复制必须先同步 `textarea + execCommand('copy')`，`writeText` 只作补充。已是 `(...)` 的剪贴板内容不要再走智能粘贴拆分。
+```
 
 ---
 
