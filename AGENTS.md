@@ -9,8 +9,23 @@
 以 DevTools Snippet / 用户脚本 / Local Overrides 形式注入，适用于禁止安装浏览器扩展的环境。
 
 - 不修改 pgAdmin 后端、不创建数据库连接、不外发任何数据（离线优先）。
-- 当前交付物：`pg4-assist.js`（v2，约 3200 行，IIFE 单文件）。
+- 当前交付物：`pg4-assist.js`（v2，约 3800 行，IIFE 单文件）。
 - 旧实现（MV3 扩展、v1 自建 UI snippet）已归档至 `legacy/`，不要在那里加新功能。
+
+## 性能与默认值（改配置前必读）
+
+- **实时诊断默认关闭**（`diagnosticsEnabled: false`）。它每次都对**整篇文档**重新分词，
+  实测约 0.22 ms / 1000 字符；39 万字符的脚本单次近 93 ms，每 400 ms 触发一次，
+  相当于持续占用约 1/4 个核。需要时在面板「设置 → 诊断」打开。
+- 三处体积阈值（都是**字符数**，不是字节数，见文件顶部常量）：
+  `MAX_DIAG_DOC_CHARS = 400_000`（超过则诊断放弃）、
+  `ANALYZE_WINDOW_THRESHOLD = 200_000`（超过则补全/诊断只取光标附近
+  `ANALYZE_WINDOW_BACK`+`ANALYZE_WINDOW_FWD` 的窗口）。
+- `completionSource` 用 CM6 的 `doc.sliceString()` 取窗口，**不要**改回
+  `ctx.state.doc.toString()` —— 后者每 90 ms 就把整篇文档拼成一个新字符串。
+- 改动 `DEFAULT_CONFIG` 里任何默认值的**语义**时，必须递增 `CONFIG_VERSION`
+  并在 `loadConfig()` 里加一次性迁移。因为配置合并是 `{...DEFAULT_CONFIG, ...saved}`，
+  老用户 localStorage 里的旧值会盖掉新默认值。
 
 ## 快速开始
 
@@ -50,5 +65,19 @@ IndexedDB 存储 → 语句上下文分析 → 候选生成排序 → 诊断 →
   已解析配置里的 `override[0]`。
 - `StateEffect.appendConfig` 不可撤销：每个 `EditorView` 只挂一次扩展（`view.__pg4Slot`），
   通过 `slot.session` 读当前会话。
-- 本机 git 全局代理 `http://127.0.0.1:7890`（Clash），需代理运行才能访问 GitHub；
-  内网域名在代理下访问失败。
+- **监听器必须具名**才能被 `removeEventListener` 摘掉。`installGridCopyHook` 里
+  那个「点菜单外面收起菜单」的 pointerdown 就踩过这个坑（匿名函数无法摘除，
+  destroy → 重跑 每轮残留一个）。新增监听器时顺手在对应的 unhook 里补摘除。
+- **`destroy()` 要删两个全局**：`window[NS]`（`__pg4Assist`）和 `window.__pg4`。
+  后者是另一个对象，它的 `.core` 会强引用整份 schema graph。
+- **`Core.observers` 会强引用 iframe 的 `win`**（等于整个 frame 的 JS 堆）。
+  新增观察器必须带上 `frameEl`，由 `pruneObservers()` 回收。
+  判失效要**同时**看两件事：`!frameEl.isConnected`（元素被摘掉）
+  和 `sameOriginWindow(frameEl) !== o.win`（iframe 导航换了新窗口）——
+  只看前者会漏掉导航这种情况。
+- 例外：`watchFrameLoad` 的 load 监听器、`attachWindow` 里子 frame 的
+  pointerdown **故意不摘** —— 它们不捕获 core，每次从 `window[NS]` 取当前实例，
+  脚本重跑后自动指向新实例。改这些地方前先确认这个约定。
+- git 访问 GitHub 走的是**环境变量里的传输层代理**（`$https_proxy`，端口会变，
+  实测见过 4783 / 12484），不是 git 配置；schannel 会报
+  `CRYPT_E_NO_REVOCATION_CHECK`，解法见 skill `git-push-behind-tls-proxy`。

@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.2.3";
+  const VERSION = "2.2.4";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -35,8 +35,11 @@
   // ═══════════════════════════════════════════════════════════════════════════
 
   const CONFIG_KEY = "pg4.assist.config";
+  /** 配置结构版本。改动默认值语义时递增，并在 loadConfig 里做一次性迁移。 */
+  const CONFIG_VERSION = 2;
 
   const DEFAULT_CONFIG = {
+    configVersion: CONFIG_VERSION,
     completionEnabled: true,
     /** 输入多少个字符后自动弹出补全（0 = 只在 . 或 " 之后弹） */
     autoTriggerMinChars: 1,
@@ -48,7 +51,12 @@
     hoverEnabled: true,
     hoverDelayMs: 300,
 
-    diagnosticsEnabled: true,
+    /**
+     * 实时诊断默认关闭：它每次都要对整篇文档重新分词（实测约 0.22 ms / 1000 字符，
+     * 39 万字符的脚本单次近 93 ms，每 400 ms 触发一次，相当于持续占用约 1/4 个核）。
+     * 需要时可在面板「设置 → 诊断」里打开。
+     */
+    diagnosticsEnabled: false,
     diagnosticsDebounceMs: 400,
     diagUnknownObject: true,
     diagQuoteRequired: true,
@@ -75,6 +83,17 @@
   const ST_HISTORY = "history";
 
   const MAX_HISTORY_ROWS = 5000;
+
+  /**
+   * 大文档保护阈值（单位都是「字符数」，即 String.length，不是字节数）。
+   * 三个功能各自有独立上限，改动前先看清楚是哪一层在起作用。
+   */
+  /** 超过此长度，诊断直接放弃（全量分词代价过高） */
+  const MAX_DIAG_DOC_CHARS = 400_000;
+  /** 超过此长度，补全/诊断只在光标附近取窗口，不再全文分词 */
+  const ANALYZE_WINDOW_THRESHOLD = 200_000;
+  const ANALYZE_WINDOW_BACK = 40_000;
+  const ANALYZE_WINDOW_FWD = 4_000;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // §1  基础工具
@@ -1052,7 +1071,17 @@
   function loadConfig() {
     try {
       const raw = localStorage.getItem(CONFIG_KEY);
-      if (raw) currentConfig = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+      if (raw) {
+        const saved = JSON.parse(raw) || {};
+        currentConfig = { ...DEFAULT_CONFIG, ...saved };
+        // v1 → v2：实时诊断改为默认关闭。旧配置里没有 configVersion 字段，
+        // 说明是这次改动之前存下的，因此强制套用一次新默认值；
+        // 之后用户在面板里的选择会连同 configVersion 一起存下来，不再被覆盖。
+        if (!saved.configVersion || saved.configVersion < CONFIG_VERSION) {
+          currentConfig.diagnosticsEnabled = DEFAULT_CONFIG.diagnosticsEnabled;
+          saveConfig({ configVersion: CONFIG_VERSION });
+        }
+      }
     } catch { /* 用默认值 */ }
     return currentConfig;
   }
@@ -1140,6 +1169,11 @@
 
   /**
    * 分析光标处的补全上下文。
+   * @param {string} docText 全文，或调用方已切好的窗口文本
+   * @param {number} pos 光标在**文档**中的绝对位置
+   * @param {object} graph
+   * @param {number} [baseOverride] 当 docText 是窗口时，窗口起点在文档中的绝对位置。
+   *   传了它就不再自己切片 —— 配合 CM6 的 sliceString 可省掉 doc.toString() 的全量拼接。
    * @returns {null | {
    *   kind: string, from: number, replaceFrom: number, hadOpenQuote: boolean,
    *   typed: string, qualifier: {name:string,quoted:boolean}|null,
@@ -1147,13 +1181,15 @@
    *   afterJoinOn: boolean, insertColumns: Relation|null, stmtFrom: number, stmtTo: number
    * }}
    */
-  function analyzeContext(docText, pos, graph) {
+  function analyzeContext(docText, pos, graph, baseOverride) {
     // 大文档只分析光标附近，避免每次按键都全量分词
     let base = 0;
     let text = docText;
-    if (docText.length > 200_000) {
-      base = Math.max(0, pos - 40_000);
-      text = docText.slice(base, Math.min(docText.length, pos + 4_000));
+    if (typeof baseOverride === "number") {
+      base = baseOverride;
+    } else if (docText.length > ANALYZE_WINDOW_THRESHOLD) {
+      base = Math.max(0, pos - ANALYZE_WINDOW_BACK);
+      text = docText.slice(base, Math.min(docText.length, pos + ANALYZE_WINDOW_FWD));
     }
     const localPos = pos - base;
 
@@ -1596,7 +1632,7 @@
   function runDiagnostics(docText, graph) {
     const cfg = currentConfig;
     if (!cfg.diagnosticsEnabled || !graph) return [];
-    if (docText.length > 400_000) return [];
+    if (docText.length > MAX_DIAG_DOC_CHARS) return [];
 
     const out = [];
     const tokens = tokenize(docText, { keepComments: false });
@@ -2072,8 +2108,20 @@
       const graph = this.core.graph;
       if (!graph) return null;
 
-      const docText = ctx.state.doc.toString();
-      const info = analyzeContext(docText, ctx.pos, graph);
+      // 大文档不拼整篇字符串：用 CM6 的 sliceString 直接取光标附近的窗口，
+      // 再用 base 把窗口内坐标还原成文档绝对坐标。
+      // 旧写法是 ctx.state.doc.toString() —— 每 90 ms 就把整篇文档拼成一个新字符串。
+      const doc = ctx.state.doc;
+      const docLen = doc.length;
+      let docText;
+      let base = 0;
+      if (docLen > ANALYZE_WINDOW_THRESHOLD) {
+        base = Math.max(0, ctx.pos - ANALYZE_WINDOW_BACK);
+        docText = doc.sliceString(base, Math.min(docLen, ctx.pos + ANALYZE_WINDOW_FWD));
+      } else {
+        docText = doc.toString();
+      }
+      const info = analyzeContext(docText, ctx.pos, graph, base);
       if (!info) return null;
       if (!ctx.explicit && !info.qualifier && info.typed.length < Math.max(1, currentConfig.autoTriggerMinChars)) {
         return null;
@@ -2201,8 +2249,20 @@
       if (this.destroyed || !this.slot) return;
       try {
         const graph = this.core.graph;
+        const docLen = this.view.state.doc.length;
+        // 诊断关闭 / 没有快照 / 文档超限：只负责清掉已有标记就返回。
+        // 关键是不能在这里 doc.toString() —— 否则关掉开关也照样每次白拼一遍全文。
+        const skip = !currentConfig.diagnosticsEnabled || !graph || docLen > MAX_DIAG_DOC_CHARS;
+        if (skip) {
+          if (this.diagnostics.length) {
+            this.diagnostics = [];
+            this.view.dispatch({ effects: this.slot.setDiagEffect.of([]) });
+            this.core.onDiagnosticsChanged();
+          }
+          return;
+        }
         const text = this.view.state.doc.toString();
-        this.diagnostics = graph ? runDiagnostics(text, graph) : [];
+        this.diagnostics = runDiagnostics(text, graph);
         this.view.dispatch({ effects: this.slot.setDiagEffect.of(this.diagnostics) });
         this.core.onDiagnosticsChanged();
       } catch (e) {
@@ -2730,14 +2790,18 @@
       copySelectionAsIn(win.document);
     };
 
+    // 点菜单外面收起菜单。必须具名：匿名函数拿不到引用，
+    // removeEventListener 摘不掉，destroy → 重跑 每轮都会残留一个监听器。
+    const onOutsidePointerDown = (ev) => {
+      if (activeMenu && !activeMenu.contains(ev.target)) hideMenu();
+    };
+
     try {
       win.addEventListener("keydown", onKeydown, true);
       win.addEventListener("mousedown", onGridMouseDown, true);
       win.addEventListener("contextmenu", onContextMenu, true);
       win.addEventListener("click", onDocClick, true);
-      win.addEventListener("pointerdown", (e) => {
-        if (activeMenu && !activeMenu.contains(e.target)) hideMenu();
-      }, true);
+      win.addEventListener("pointerdown", onOutsidePointerDown, true);
       syncToolbar();
       if (win.document && win.document.body) {
         toolbarObserver = new win.MutationObserver(debounce(syncToolbar, 250));
@@ -2752,6 +2816,7 @@
         win.removeEventListener("mousedown", onGridMouseDown, true);
         win.removeEventListener("contextmenu", onContextMenu, true);
         win.removeEventListener("click", onDocClick, true);
+        win.removeEventListener("pointerdown", onOutsidePointerDown, true);
         hideMenu();
         if (toolbarObserver) toolbarObserver.disconnect();
         const leftover = win.document && win.document.querySelectorAll(".pg4-copy-in-btn");
@@ -3144,7 +3209,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
           ${num("hoverDelayMs", "悬停延迟 (ms)", 0, 3000)}
         </div>
         <div class="sec"><h3>诊断</h3>
-          ${chk("diagnosticsEnabled", "启用实时诊断")}
+          ${chk("diagnosticsEnabled", "启用实时诊断", "默认关闭：每次按键都会对全文重新分词，长脚本下开销明显")}
           ${chk("diagUnknownObject", "未知表 / 未知列")}
           ${chk("diagQuoteRequired", "标识符大小写与引号检查", "本库标识符均为带引号的 PascalCase")}
           ${chk("diagMissingWhere", "UPDATE / DELETE 缺少 WHERE")}
@@ -3481,15 +3546,16 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
         const w = sameOriginWindow(frameEl);
         if (!w || !w.document) continue;
         added += this.attachWindow(w);
-        this.observeDom(w);
+        this.observeDom(w, frameEl);
         watchFrameLoad(frameEl);
       }
       this.gcSessions();
+      this.pruneObservers();
       this.onDiagnosticsChanged();
       return added;
     }
 
-    observeDom(win) {
+    observeDom(win, frameEl) {
       if (this.disposed || win.__pg4Observer) return;
       try {
         if (!win.document || !win.document.body) return;
@@ -3502,8 +3568,33 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
         );
         mo.observe(win.document.body, { childList: true, subtree: true });
         win.__pg4Observer = mo;
-        this.observers.push({ mo, win });
+        this.observers.push({ mo, win, frameEl: frameEl || null });
       } catch { /* frame 已卸载 */ }
+    }
+
+    /**
+     * 回收已经失效的 iframe 观察器。这些条目**强引用 win**（等于整个 frame 的 JS 堆），
+     * 不清的话每开关一次 Query Tool 标签页就多留一份，一直要到 destroy 才释放。
+     * 失效有两种情形：
+     *   1. iframe 元素被摘出文档（isConnected 为 false）；
+     *   2. iframe 发生了导航 —— 元素还在，但 contentWindow 已经换成新窗口，
+     *      旧窗口的 observer 必须一并回收，否则新窗口会再挂一个、旧的不走。
+     * 顶层窗口（frameEl 为 null）不参与回收。
+     */
+    pruneObservers() {
+      for (let i = this.observers.length - 1; i >= 0; i--) {
+        const o = this.observers[i];
+        let gone = false;
+        if (o.frameEl) {
+          try {
+            gone = !o.frameEl.isConnected || sameOriginWindow(o.frameEl) !== o.win;
+          } catch { gone = true; }
+        }
+        if (!gone) continue;
+        try { o.mo.disconnect(); } catch { /* ignore */ }
+        try { delete o.win.__pg4Observer; } catch { /* ignore */ }
+        this.observers.splice(i, 1);
+      }
     }
 
     gcSessions() {
@@ -3576,6 +3667,13 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       }
       try { this.panel.host.remove(); } catch { /* ignore */ }
       try { this.channel && this.channel.close(); } catch { /* ignore */ }
+      // window.__pg4 是另一个对象（见 startHere），只删 window[NS] 不够：
+      // window.__pg4.core 会一直强引用本实例，连带整份 graph 都回收不掉。
+      try { delete window.__pg4; } catch { /* ignore */ }
+      this.graph = null;
+      this.usageCache = null;
+      this.snapshotMeta = null;
+      this.panel = null;
       delete window[NS];
       log("PG4 Assist 已卸载");
     }
@@ -3597,7 +3695,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
         if (!core || core.disposed) return;
         const w = sameOriginWindow(frameEl);
         if (!w) return;
-        core.observeDom(w);
+        core.observeDom(w, frameEl);
         core.attachWindow(w);
         core.onDiagnosticsChanged();
       }, 300);
