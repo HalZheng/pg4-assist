@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.2.4";
+  const VERSION = "2.2.7";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1392,7 +1392,7 @@
 
   const SQL_KEYWORD_SUGGESTIONS = [
     "SELECT", "FROM", "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "ON",
-    "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "INSERT INTO", "VALUES",
+    "GROUP BY", "ORDER BY", "ASC", "DESC", "HAVING", "LIMIT", "OFFSET", "INSERT INTO", "VALUES",
     "UPDATE", "SET", "DELETE FROM", "RETURNING", "DISTINCT", "COUNT(*)", "WITH",
     "UNION ALL", "CASE WHEN", "IS NULL", "IS NOT NULL", "COALESCE", "EXISTS",
     // 裸关键字必须与组合关键字并列存在：CM6 模糊匹配下，输入 join/on/as 等短词
@@ -1564,6 +1564,14 @@
     const kwBoost = (k) => {
       if (info.clause === "select" && k === "FROM") return 92;
       if (info.clause === "from" && (k === "JOIN" || k === "INNER JOIN" || k === "LEFT JOIN" || k === "WHERE")) return 92;
+      if (info.clause === "order" && (k === "ASC" || k === "DESC")) {
+        for (let i = info.stmtTokens.length - 1; i >= 0; i--) {
+          const t = info.stmtTokens[i];
+          if (t.to + info.tokenBase > info.replaceFrom) continue;
+          if (kw(t) !== "by" && kw(t) !== "order" && t.text !== ",") return 92;
+          break;
+        }
+      }
       return 20;
     };
     // CM6 匹配分对大小写折叠罚 -200（例：输入 fro 时 label "FROM" 得 -304，而列
@@ -2021,6 +2029,8 @@
       this.completionFacet = null;
       this.destroyed = false;
       this.dbName = detectDatabaseName(win);
+      this.triggerPending = false;
+      this.pendingTab = null;
     }
 
     install() {
@@ -2035,6 +2045,7 @@
       this.slot = slot;
 
       this.trigger = debounce(() => {
+        self.triggerPending = false;
         if (self.destroyed || slot.session !== self) return;
         if (Date.now() < self.suppressAutoUntil) return;
         if (!currentConfig.completionEnabled) return;
@@ -2045,25 +2056,91 @@
       this.runDiag = debounce(() => self.refreshDiagnostics(), currentConfig.diagnosticsDebounceMs);
 
       this.hookCompletion();
+      this.onPendingTabKeyDown = (ev) => {
+        if (ev.key === "Escape" && view.contentDOM.contains(ev.target)) {
+          this.clearPendingTab();
+          this.trigger.cancel();
+          this.triggerPending = false;
+          return;
+        }
+        if (ev.key !== "Tab" || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey
+          || !view.contentDOM.contains(ev.target) || !currentConfig.completionEnabled || !this.core.graph) return;
+        const status = A.completionStatus(view.state);
+        if (status === "active" || (!this.triggerPending && status !== "pending")) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (!this.pendingTab) this.acceptWhenReady();
+      };
+      this.win.addEventListener("keydown", this.onPendingTabKeyDown, true);
       view.dom.setAttribute("data-pg4", this.id);
       this.refreshDiagnostics();
       return this;
     }
 
     onUpdate(u) {
+      if (this.pendingTab) {
+        const pending = this.pendingTab;
+        if (u.docChanged || u.state.selection.main.head !== pending.pos) this.clearPendingTab();
+        else {
+          const status = this.M.autocomplete.completionStatus(u.state);
+          if (status === "pending") pending.requested = true;
+          else if (status === "active" || (pending.requested && status === null)) {
+            this.win.setTimeout(() => this.resolvePendingTab(pending, status === null), 0);
+          }
+        }
+      }
       if (u.docChanged) this.runDiag();
       if (!u.docChanged) return;
       if (!u.transactions.some((tr) => tr.isUserEvent("input.type"))) return;
       const pos = u.state.selection.main.head;
       const before = u.state.sliceDoc(Math.max(0, pos - 1), pos);
-      if (before === "." || before === '"') { this.trigger(); return; }
+      if (before === "." || before === '"') { this.triggerPending = true; this.trigger(); return; }
       if (!/[A-Za-z0-9_$]/.test(before)) return;
       let n = 0;
       for (let i = pos - 1; i >= 0 && n < 8; i--) {
         if (!/[A-Za-z0-9_$]/.test(u.state.sliceDoc(i, i + 1))) break;
         n++;
       }
-      if (n >= Math.max(1, currentConfig.autoTriggerMinChars)) this.trigger();
+      if (n >= Math.max(1, currentConfig.autoTriggerMinChars)) {
+        this.triggerPending = true;
+        this.trigger();
+      }
+    }
+
+    clearPendingTab() {
+      if (this.pendingTab) this.win.clearTimeout(this.pendingTab.timer);
+      this.pendingTab = null;
+    }
+
+    resolvePendingTab(pending, fallback = false) {
+      if (this.pendingTab !== pending) return;
+      const view = this.view;
+      if (this.destroyed || !currentConfig.completionEnabled || !view.contentDOM.contains(view.dom.ownerDocument.activeElement)
+        || view.state.selection.main.head !== pending.pos
+        || view.state.doc !== pending.doc) { this.clearPendingTab(); return; }
+      const ready = this.M.autocomplete.completionStatus(view.state) === "active";
+      if (!ready && !fallback) return;
+      if (ready && this.M.autocomplete.acceptCompletion(view)) {
+        this.clearPendingTab();
+        return;
+      }
+      if (ready && !fallback) {
+        this.win.requestAnimationFrame(() => this.resolvePendingTab(pending));
+        return;
+      }
+      this.clearPendingTab();
+      view.dispatch({ changes: { from: pending.pos, insert: "\t" }, selection: { anchor: pending.pos + 1 }, userEvent: "input.type" });
+    }
+
+    acceptWhenReady() {
+      this.trigger.cancel();
+      this.triggerPending = false;
+      const view = this.view;
+      const pending = { pos: view.state.selection.main.head, doc: view.state.doc, timer: 0 };
+      this.pendingTab = pending;
+      pending.timer = this.win.setTimeout(() => this.resolvePendingTab(pending, true), 1200);
+      this.M.autocomplete.startCompletion(view);
+      this.win.setTimeout(() => this.resolvePendingTab(pending), 0);
     }
 
     /**
@@ -2290,6 +2367,8 @@
     destroy() {
       this.destroyed = true;
       this.trigger && this.trigger.cancel();
+      this.clearPendingTab();
+      if (this.onPendingTabKeyDown) this.win.removeEventListener("keydown", this.onPendingTabKeyDown, true);
       this.runDiag && this.runDiag.cancel();
       // 已 append 的扩展无法撤销，只能把插槽置空让它们变成空操作；
       // 补全 override 则还原成 pgAdmin 原本的服务端源。
@@ -2363,7 +2442,7 @@
    *    将去除 CSV 引号包装的原始纯文本写入剪贴板（避免如 "hello" 复制为带外层双引号）。
    * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
    */
-  const GRID_HOOK_REV = 6;
+  const GRID_HOOK_REV = 9;
 
   function installGridCopyHook(win) {
     if (win.__pg4GridCopyHook === GRID_HOOK_REV) return;
@@ -2384,10 +2463,11 @@
     }
 
     let unhookProto = null;
+    let CsvClass = null;
     if (csvHelperId) {
       try {
         const mod = req(csvHelperId);
-        const CsvClass = mod && (mod.default || mod);
+        CsvClass = mod && (mod.default || mod);
         if (CsvClass && CsvClass.prototype && typeof CsvClass.prototype.copyRowsToCsv === "function") {
           const proto = CsvClass.prototype;
           if (!proto.__pg4OrigCopy) {
@@ -2428,7 +2508,9 @@
     }
 
     function findCopyButton(doc, titles) {
-      return Array.from(doc.querySelectorAll("button")).find((b) => {
+      const buttons = Array.from(doc.querySelectorAll("#id-dataoutput button"));
+      return buttons.find((b) => titles.some((x) => b.getAttribute("data-label")?.toLowerCase() === x.toLowerCase()))
+        || buttons.find((b) => {
         const t = b.getAttribute("title") || b.getAttribute("aria-label") || "";
         return titles.some((x) => t === x || t.toLowerCase() === x.toLowerCase() || t.includes(x));
       });
@@ -2439,8 +2521,7 @@
       const doc = win.document;
       if (!doc) return;
       if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === "c" || ev.key === "C")) {
-        const inBtn = doc.querySelector(".pg4-copy-in-btn");
-        if (inBtn && !inBtn.disabled) {
+        if (doc.querySelector(".rdg")) {
           ev.preventDefault();
           ev.stopPropagation();
           copySelectionAsIn(doc);
@@ -2448,14 +2529,10 @@
         }
       }
       if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === "c" || ev.key === "C")) {
-        const cell = doc.activeElement && doc.activeElement.closest(".rdg-cell[role='gridcell']");
-        if (cell) {
-          const copyBtn = findCopyButton(doc, ["复制", "Copy"]);
-          if (copyBtn) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            copyBtn.click();
-          }
+        if (CsvClass && doc.activeElement?.closest(".rdg-cell")) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          copyGridSelection(doc, "data");
         }
       }
     };
@@ -2477,7 +2554,7 @@
           let setCount = 0;
           let total = 0;
           while (s) {
-            if (s.memoizedState instanceof Set) setCount++;
+            if (s.memoizedState instanceof win.Set) setCount++;
             s = s.next;
             total++;
           }
@@ -2496,8 +2573,8 @@
             if (hookIdx === 6 && ms && typeof ms === "object" && ms.current && ms.current.clientPK) {
               clientPK = ms.current.clientPK;
             }
-            if (hookIdx === 8 && ms instanceof Set) selectedRowsSet = ms;
-            if (hookIdx === 9 && ms instanceof Set) selectedColsSet = ms;
+            if (hookIdx === 8 && ms instanceof win.Set) selectedRowsSet = ms;
+            if (hookIdx === 9 && ms instanceof win.Set) selectedColsSet = ms;
             if (hookIdx === 12 && ms && typeof ms === "object" && ms !== null && "current" in ms) cellRef = ms.current;
             if (hookIdx === 13 && ms && typeof ms === "object" && ms !== null && "current" in ms) rangeRef = ms.current;
             s = s.next;
@@ -2509,9 +2586,7 @@
               if (rows.length) return { kind: "rows", rows, cols: colsState };
             }
             if (selectedColsSet && selectedColsSet.size > 0) {
-              const cols = colsState.filter((_, idx) => (
-                selectedColsSet.has(idx) || selectedColsSet.has(idx + 1) || selectedColsSet.has(idx + 2)
-              ));
+              const cols = colsState.filter((_, idx) => selectedColsSet.has(idx + 1));
               if (cols.length) return { kind: "cols", rows: rowsState, cols };
             }
             if (rangeRef && rangeRef.startColumnIdx != null) {
@@ -2542,6 +2617,12 @@
       return raw;
     }
 
+    function headerColumnName(header, index) {
+      return header?.querySelector("[data-column-key]")?.getAttribute("data-column-key")
+        || header?.querySelector(".QueryTool-columnName")?.textContent?.trim()
+        || header?.textContent?.trim().split("\n")[0] || ("col" + index);
+    }
+
     function extractGridSelectionFromDom(doc, rowsState, colsState) {
       const grid = doc.querySelector(".rdg");
       if (!grid) return null;
@@ -2553,7 +2634,7 @@
           const fromState = colsState && colsState[idx - 2];
           if (fromState) return fromState;
           const header = selectedHeaders.find((h) => Number(h.getAttribute("aria-colindex")) === idx);
-          const name = ((header && header.textContent) || "").trim().split("\n")[0] || ("col" + idx);
+          const name = headerColumnName(header, idx);
           return { key: name, name, type: "text", cell: "string", __colIndex: idx };
         });
         const dataRows = Array.from(grid.querySelectorAll('.rdg-row[role="row"]')).filter((r) => r.querySelector('.rdg-cell[role="gridcell"]'));
@@ -2566,7 +2647,7 @@
           });
           return obj;
         });
-        if (rows.length && cols.length) return { kind: "cols", rows, cols };
+        if (cols.length) return { kind: "cols", rows, cols };
       }
 
       const selectedRows = Array.from(grid.querySelectorAll('.rdg-row[role="row"][aria-selected="true"]'));
@@ -2590,7 +2671,7 @@
         const fromState = colsState && colsState[idx - 2];
         if (fromState) return fromState;
         const header = grid.querySelector(`.rdg-cell[role="columnheader"][aria-colindex="${idx}"]`);
-        const name = ((header && header.textContent) || "").trim().split("\n")[0] || ("c" + idx);
+        const name = headerColumnName(header, idx);
         return { key: name, name, type: "text", cell: "string" };
       });
       const rows = rowEls.map((rowEl) => {
@@ -2639,6 +2720,7 @@
 
     function writeClipboard(text) {
       let ok = false;
+      const focused = win.document.activeElement;
       try {
         const ta = win.document.createElement("textarea");
         ta.value = text;
@@ -2653,40 +2735,61 @@
       } catch {
         ok = false;
       }
+      if (focused?.isConnected) focused.focus({ preventScroll: true });
       try {
         if (win.navigator && win.navigator.clipboard && win.navigator.clipboard.writeText) {
-          win.navigator.clipboard.writeText(text);
+          win.navigator.clipboard.writeText(text).catch(() => {});
         }
       } catch { /* ignore */ }
       return ok;
     }
 
-    function copySelectionAsIn(doc) {
-      let selData = null;
-      try { selData = extractGridSelection(doc); } catch (e) { dbg("extractGridSelection", e); }
-      if (!selData || !selData.rows.length || !selData.cols.length) {
-        const core = window[NS];
-        if (core) core.toast("请先选中结果网格中的单元格 / 列 / 行");
+    function formatGridCopy(rows, cols, mode) {
+      if (!CsvClass || !cols.length) return null;
+      const csv = new CsvClass();
+      const separator = csv.CSVOptions.field_separator;
+      const headers = cols.map((col) => csv.csvCell(col.name, col, true)).join(separator);
+      if (mode === "headers") return headers;
+      if (!rows.length) return null;
+      if (mode === "data" && rows.length === 1 && cols.length === 1 && currentConfig.gridUnquoteSingleCell) {
+        const value = rows[0][cols[0].key];
+        return value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+      }
+      const body = rows.map((row) => cols.map((col) => csv.csvCell(row[col.key], col)).join(separator)).join("\n");
+      return mode === "withHeaders" ? headers + "\n" + body : body;
+    }
+
+    function copyGridSelection(doc, mode) {
+      const core = window[NS];
+      let selection = null;
+      try { selection = extractGridSelection(doc); } catch (e) { dbg("extractGridSelection", e); }
+      if (!selection || !selection.cols.length || (mode !== "headers" && !selection.rows.length)) {
+        core && core.toast("请先选中结果网格中的单元格 / 列 / 行");
         return false;
       }
-      const text = formatAsInClause(selData.rows, selData.cols);
-      if (!text) return false;
-      if (writeClipboard(text)) {
-        const core = window[NS];
-        if (core) core.toast(`已复制 IN 条件（${selData.rows.length} 项）`);
-        return true;
+      const text = mode === "in" ? formatAsInClause(selection.rows, selection.cols)
+        : formatGridCopy(selection.rows, selection.cols, mode);
+      if (text === null || !writeClipboard(text)) {
+        core && core.toast("复制失败：浏览器未允许写入剪贴板或复制格式不可用");
+        return false;
       }
-      const core = window[NS];
-      if (core) core.toast("复制失败：浏览器未允许写入剪贴板");
-      return false;
+      core && core.toast(`已复制${mode === "in" ? " IN 条件" : mode === "headers" ? "列名" : mode === "withHeaders" ? "列名和数据" : "数据"}`);
+      return true;
+    }
+
+    function copySelectionAsIn(doc) {
+      return copyGridSelection(doc, "in");
     }
 
     let activeMenu = null;
+    let menuTrigger = null;
     const hideMenu = () => {
       if (activeMenu) {
         activeMenu.remove();
         activeMenu = null;
       }
+      menuTrigger?.setAttribute("aria-expanded", "false");
+      menuTrigger = null;
     };
 
     function showInMenu(doc, x, y) {
@@ -2747,47 +2850,131 @@
       showInMenu(doc, ev.clientX, ev.clientY);
     };
 
-    function ensureInToolbarButton(doc) {
+    function showCopyMenu(doc, button) {
+      hideMenu();
+      const menu = doc.createElement("div");
+      menu.className = "pg4-grid-context-menu";
+      menu.setAttribute("role", "menu");
+      menu.setAttribute("aria-label", "复制选项");
+      menu.style.cssText = "position:fixed;z-index:999999;background:var(--color-bg,#fff);color:var(--color-fg,#212121);border:1px solid rgba(127,127,127,.3);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.2);padding:4px 0;min-width:196px;font-size:12px;font-family:inherit;";
+      const choices = [
+        ["data", "仅复制数据"],
+        ["withHeaders", "复制列名和数据"],
+        ["headers", "仅复制列名"],
+        ["in", "复制为 IN 条件"],
+      ];
+      choices.forEach(([mode, label], index) => {
+        if (index === 3) {
+          const divider = doc.createElement("div");
+          divider.setAttribute("role", "separator");
+          divider.style.cssText = "border-top:1px solid rgba(127,127,127,.25);margin:4px 0";
+          menu.appendChild(divider);
+        }
+        const item = doc.createElement("button");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.dataset.pg4CopyMode = mode;
+        item.textContent = label;
+        item.style.cssText = "display:block;width:100%;padding:7px 12px;text-align:left;border:0;background:transparent;color:inherit;cursor:pointer;font:inherit";
+        item.onmouseenter = () => { item.style.background = "rgba(127,127,127,.15)"; };
+        item.onmouseleave = () => { item.style.background = "transparent"; };
+        menu.appendChild(item);
+      });
+      doc.body.appendChild(menu);
+      activeMenu = menu;
+      menuTrigger = button;
+      const rect = button.getBoundingClientRect();
+      const size = menu.getBoundingClientRect();
+      menu.style.left = `${Math.max(0, Math.min(rect.right - size.width, win.innerWidth - size.width - 8))}px`;
+      menu.style.top = `${rect.bottom + size.height > win.innerHeight ? Math.max(0, rect.top - size.height) : rect.bottom}px`;
+      button.setAttribute("aria-expanded", "true");
+      menu.querySelector("button")?.focus();
+      menu.addEventListener("keydown", (ev) => {
+        const items = [...menu.querySelectorAll('[role="menuitem"]')];
+        const index = items.indexOf(doc.activeElement);
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          hideMenu();
+          button.focus();
+        } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+          ev.preventDefault();
+          items[(index + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+        } else if (ev.key === "Tab") hideMenu();
+      });
+    }
+
+    function ensureCopyToolbar(doc) {
       if (!doc.querySelector(".rdg")) return;
-      if (doc.querySelector(".pg4-copy-in-btn")) return;
       const copyBtn = findCopyButton(doc, ["复制", "Copy"]);
       if (!copyBtn) return;
       const group = copyBtn.closest(".MuiButtonGroup-root");
       if (!group) return;
       const copyOptBtn = findCopyButton(doc, ["复制选项", "Copy options"]);
-      const inBtn = doc.createElement("button");
-      inBtn.type = "button";
-      inBtn.className = (copyBtn.className || "") + " pg4-copy-in-btn";
-      inBtn.title = "复制为 IN 条件 (Ctrl+Shift+C)";
-      inBtn.setAttribute("aria-label", "复制为 IN 条件");
-      inBtn.style.fontWeight = "700";
-      inBtn.style.fontSize = "11px";
-      inBtn.style.minWidth = "32px";
-      inBtn.textContent = "IN";
-      inBtn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        copySelectionAsIn(win.document);
-      };
-      if (copyOptBtn && copyOptBtn.parentNode === group) {
-        group.insertBefore(inBtn, copyOptBtn.nextSibling);
-      } else {
-        group.appendChild(inBtn);
+      if (!CsvClass || !copyOptBtn || copyOptBtn.parentNode !== group) return;
+      if (!copyBtn.hasAttribute("data-pg4-original-title")) {
+        copyBtn.setAttribute("data-pg4-original-title", copyBtn.title);
+        if (copyBtn.hasAttribute("title")) copyBtn.setAttribute("data-pg4-had-title", "");
       }
+      copyBtn.title = "复制列名和数据";
+      if (!copyOptBtn.hasAttribute("data-pg4-original-title")) {
+        copyOptBtn.setAttribute("data-pg4-original-title", copyOptBtn.title);
+        if (copyOptBtn.hasAttribute("title")) copyOptBtn.setAttribute("data-pg4-had-title", "");
+      }
+      copyOptBtn.title = "Modified · PG4 Assist 复制选项";
+      for (const element of [copyBtn, copyBtn.parentElement, copyOptBtn]) {
+        if (!element.hasAttribute("data-pg4-original-label")) {
+          element.setAttribute("data-pg4-original-label", element.getAttribute("aria-label") ?? "");
+          if (element.hasAttribute("aria-label")) element.setAttribute("data-pg4-had-label", "");
+        }
+      }
+      copyBtn.setAttribute("aria-label", "复制列名和数据");
+      if (copyBtn.parentElement.hasAttribute("data-pg4-had-label")) copyBtn.parentElement.setAttribute("aria-label", "复制列名和数据");
+      copyOptBtn.setAttribute("aria-label", "复制选项");
+      if (!doc.getElementById("pg4-copy-modified-style")) {
+        const style = doc.createElement("style");
+        style.id = "pg4-copy-modified-style";
+        style.textContent = `.pg4-copy-modified { min-width: 48px !important; width: 48px; padding: 2px 5px !important; gap: 2px; background: #356d68 !important; color: #fff !important; }
+      .pg4-copy-modified:hover { background: #285752 !important; }
+      .pg4-copy-modified::before { content: "MOD"; order: -1; font: 700 9px/1 sans-serif; pointer-events: none; }
+      .pg4-copy-modified > svg { width: 12px; height: 12px; flex: none; }`;
+        doc.head.appendChild(style);
+      }
+      copyOptBtn.classList.add("pg4-copy-modified");
+      group.querySelectorAll(".pg4-copy-in-btn").forEach((button) => button.remove());
     }
 
     let toolbarObserver = null;
     const syncToolbar = () => {
-      try { ensureInToolbarButton(win.document); } catch { /* ignore */ }
+      try { ensureCopyToolbar(win.document); } catch { /* ignore */ }
     };
 
     const onDocClick = (ev) => {
       const el = ev.target && (ev.target.nodeType === 1 ? ev.target : ev.target.parentElement);
-      const btn = el && el.closest && el.closest(".pg4-copy-in-btn");
-      if (!btn) return;
+      const item = el?.closest("[data-pg4-copy-mode]");
+      if (item && activeMenu?.contains(item)) {
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        const trigger = menuTrigger;
+        copyGridSelection(win.document, item.dataset.pg4CopyMode);
+        hideMenu();
+        trigger?.focus({ preventScroll: true });
+        return;
+      }
+      const btn = el?.closest("button");
+      if (!btn || !win.document.querySelector(".rdg")) return;
+      const copyBtn = findCopyButton(win.document, ["复制", "Copy"]);
+      const group = copyBtn?.closest(".MuiButtonGroup-root");
+      const optionsBtn = findCopyButton(win.document, ["复制选项", "Copy options"]);
+      if (!CsvClass || !group || optionsBtn?.parentNode !== group || (btn !== optionsBtn && btn !== copyBtn)) return;
       ev.preventDefault();
-      ev.stopPropagation();
-      copySelectionAsIn(win.document);
+      ev.stopImmediatePropagation();
+      if (btn === optionsBtn) {
+        if (activeMenu?.getAttribute("role") === "menu") hideMenu();
+        else showCopyMenu(win.document, btn);
+      } else if (btn === copyBtn) {
+        hideMenu();
+        copyGridSelection(win.document, "withHeaders");
+      }
     };
 
     // 点菜单外面收起菜单。必须具名：匿名函数拿不到引用，
@@ -2819,6 +3006,22 @@
         win.removeEventListener("pointerdown", onOutsidePointerDown, true);
         hideMenu();
         if (toolbarObserver) toolbarObserver.disconnect();
+        win.document?.getElementById("pg4-copy-modified-style")?.remove();
+        win.document?.querySelectorAll(".pg4-copy-modified").forEach((button) => button.classList.remove("pg4-copy-modified"));
+        win.document?.querySelectorAll("[data-pg4-original-title], [data-pg4-original-label]").forEach((element) => {
+          if (element.hasAttribute("data-pg4-original-title")) {
+            if (element.hasAttribute("data-pg4-had-title")) element.title = element.getAttribute("data-pg4-original-title");
+            else element.removeAttribute("title");
+            element.removeAttribute("data-pg4-original-title");
+            element.removeAttribute("data-pg4-had-title");
+          }
+          if (element.hasAttribute("data-pg4-original-label")) {
+            if (element.hasAttribute("data-pg4-had-label")) element.setAttribute("aria-label", element.getAttribute("data-pg4-original-label"));
+            else element.removeAttribute("aria-label");
+            element.removeAttribute("data-pg4-original-label");
+            element.removeAttribute("data-pg4-had-label");
+          }
+        });
         const leftover = win.document && win.document.querySelectorAll(".pg4-copy-in-btn");
         leftover && leftover.forEach((el) => el.remove());
       } catch { /* ignore */ }

@@ -353,10 +353,54 @@ pgAdmin 版本或构建：pgAdmin 4 v8.11 / v9.x（React Data Grid v7-beta）
 补充（2026-09-17 晚）：
   1. 右键 mousedown 会走 react-data-grid 选中逻辑，把已有框选 / 整列收成单格。捕获阶段只 stopPropagation、不 preventDefault，才能既保住选区又弹出 contextmenu。
   2. 点列头整列时选区在 ResultSet 的 selectedColumns Set（hook 9），不是 range / 单单元格；提取优先级必须与 COPY_DATA 一致：整行 Set → 整列 Set → range → 单格，失败再走 DOM（columnheader[aria-selected=true] / gridcell[aria-selected=true]）。
-  3. 更稳入口：结果工具栏「复制选项」旁增加 IN 按钮（Ctrl+Shift+C），不依赖右键，不改变选区。
+   3. v2.2.5 曾在结果工具栏「复制选项」旁增加 IN 按钮；v2.2.6 将它并入统一复制菜单，Ctrl+Shift+C 仍保留，不改变选区。
   4. iframe 里 `navigator.clipboard.writeText` 常因文档未聚焦而异步失败；点 IN 后系统剪贴板仍空。
      复制必须先同步 `textarea + execCommand('copy')`，`writeText` 只作补充。已是 `(...)` 的剪贴板内容不要再走智能粘贴拆分。
 ```
+
+### 11.4 结果网格统一复制入口（2026-09-25）
+
+工具栏原有复制按钮现在默认复制列名和选中数据；旁边的「复制选项」改成四条明确命令：
+仅数据、列名和数据、仅列名、IN 条件。网格内 Ctrl+C 仍仅复制数据，Ctrl+Shift+C 仍复制 IN。
+工具栏没有独立 IN 按钮；网格右键的 IN 入口暂保留。
+
+数据格式复用 pgAdmin `CsvHelper.csvCell` 的引号规则和分隔符；该站点的默认分隔符实际为
+Tab（尽管类名为 CSV），而不是逗号。空结果选中列头时仅列名操作仍可用。未来的
+INSERT / UPDATE / DELETE 应在同一下拉菜单中单独归为「生成 SQL」，不能与数据复制混淆，
+也不应自动执行生成的语句。
+
+真实站点还需注意：工具栏按钮分别使用 `data-label="复制"` 和
+`data-label="复制选项"`；无选区时前者会禁用，后者没有 `title`，不能靠标题模糊匹配。
+列头的可见文本例如 `Id[PK] uuid`，实际字段名在内层 `data-column-key="Id"`；
+DOM 选区兜底必须读后者。已验证单元格默认复制为 `"Id"` 加一行数据、仅列名为
+`"Id"`，点列头选整列时也只复制该列名。
+
+补充（v2.2.7）：React hook 8/9 的选中行/列集合是 iframe realm 的 `Set`，
+顶层 `Set` 的 `instanceof` 无法识别，导致整行复制误取行号。列集合中的索引为
+`colsState` 索引加 1，必须精确匹配，否则单列复制会带上相邻列。真实结果网格已验证：
+整行复制为 151 列表头加数据，多行 Ctrl 选择为两行数据；单列仅复制该列名，
+多列 Ctrl 选择仅复制两列；矩形选区的四种菜单格式也已核对。
+
+原生「复制选项」箭头按钮现改为内置 `MOD` 字样和向下箭头的紧凑按钮，
+使用低饱和青绿色背景区分原版；不使用外溢角标或选中态描边。按钮的 `title`
+设置为 `Modified · PG4 Assist 复制选项`（pgAdmin 自带 Tooltip 仍可能显示「复制选项」），
+下拉选项不变；`destroy()` 时移除样式并恢复原按钮属性。
+
+### 11.3 排序方向补全与 Tab 竞态（2026-09-25）
+
+使用本机私有的全量 DDL 快照（不纳入仓库）在真实站点导入验证（358 个关系、5714 列）：
+
+- `ORDER BY "Id" DE` 现可补全 `DESC`，`ASC` 同理；仅在排序字段之后提高方向关键字的权重。
+- 输入 `sta` 后立刻按 Tab 时，90 ms 的自动触发延迟会使 CM6 先插入制表符；扩展内
+   `domEventHandlers.keydown` 的优先级也低于 CM6 键映射，无法截住该按键。现在由编辑器
+   所在 iframe 的捕获阶段监听暂缓 Tab，候选可接受后交还给 CM6；无候选时回退普通缩进。
+   监听器及待处理定时器均在会话销毁时清理。
+- 使用真实快照输入 `sta` 会产生大量候选，首项是 `StandingOrder`，并非
+   `StakeholderProfile`；Tab 接受的是当前选中项。复测顶部与靠近编辑器底部的弹层时，
+   集成浏览器尚未复现黑色细条，不能仅凭弹层样式推断成因。
+- 已知问题：用户反复确认微信输入法下输入 `sta` 时，首项可能出现黑色细条，Tab / Enter
+   不好用；切换美式键盘后不再出现。合成事件测试无法复现微信输入法的实际表现，
+   后续尝试未能解决，已撤回并维持 2.2.5；暂以切换美式键盘作为绕过方法。
 
 ---
 
