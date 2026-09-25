@@ -1,0 +1,13 @@
+# 项目规则 — pg4-assist
+
+> 若你的 Trae 版本读取的是别的路径（如 `.trae/project_rules.md`），把本文件复制过去即可。
+
+- 总纲（架构 / 性能约束 / 关键坑）：`AGENTS.md`
+- 项目记忆（跨 agent 唯一事实来源）：`docs/agent-memory/`
+  - `decisions.md` —— 决策与用户偏好
+  - `pitfalls.md` —— 坑与「不要做什么」（硬约束）
+  - `log/YYYY-MM-DD.md` —— 会话流水，只追加
+
+开工前读 `decisions.md`、`pitfalls.md` 和 `log/` 里最近的文件。
+本次会话若有非显然的新结论，按 `docs/agent-memory/README.md` 的规范追加并单独提交，
+提交信息以 `memory:` 开头。

@@ -10,7 +10,28 @@
 
 - 不修改 pgAdmin 后端、不创建数据库连接、不外发任何数据（离线优先）。
 - 当前交付物：`pg4-assist.js`（v2，约 3800 行，IIFE 单文件）。
+- 对外 `VERSION` 保持克制：图标、样式及连续小修不逐次升级版本号；仅在明确计划发布或用户要求时调整。
+  内部 `GRID_HOOK_REV` 用于替换监听器，独立于对外版本；`CONFIG_VERSION` 的迁移要求见下文。
 - 旧实现（MV3 扩展、v1 自建 UI snippet）已归档至 `legacy/`，不要在那里加新功能。
+
+## 项目记忆（跨 agent，开工先读）
+
+本仓库面向多个 AI agent（Copilot / Claude Code / Cursor / Trae / WorkBuddy / Codex…），
+项目记忆的**唯一事实来源**是 [`docs/agent-memory/`](docs/agent-memory/)：
+
+- `decisions.md` —— 决策与用户偏好
+- `pitfalls.md` —— 坑与「不要做什么」（硬约束）
+- `log/YYYY-MM-DD.md` —— 会话流水，**只追加**
+
+各平台私有目录（`.cursor/rules/`、`.trae/rules/`、`.workbuddy/memory/`、`CLAUDE.md`、
+`.github/copilot-instructions.md`）里放的都是指向本目录的**薄指针**，正文只有一份。
+
+- **各 agent 记忆目录的位置与格式互不相通**：Copilot 的 `/memories/repo/` 甚至在
+  工作区之外（`%APPDATA%\...\workspaceStorage\<hash>\...`），无法被 git 追踪。
+  因此：结论只写在私有记忆里 = 其他 agent 永远看不到。
+- 会话中若有非显然的新结论，按 `docs/agent-memory/README.md` 的写入规范追加到对应文件，
+  并以 `memory:` 前缀**单独提交**（可用 `git log --grep '^memory:'` 审计）。
+- 切到其他平台时，先用 `docs/agent-memory/README.md` 里那段「开场提示词」引导它。
 
 ## 性能与默认值（改配置前必读）
 
