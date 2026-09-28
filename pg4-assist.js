@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.2.7";
+  const VERSION = "2.3.0";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2442,7 +2442,54 @@
    *    将去除 CSV 引号包装的原始纯文本写入剪贴板（避免如 "hello" 复制为带外层双引号）。
    * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
    */
-  const GRID_HOOK_REV = 9;
+  const GRID_HOOK_REV = 11;
+
+  // 结果区右键菜单的外观。不碰 pgAdmin 的工具栏按钮，所以配色只需满足两点：
+  // 底/字色沿用 rdg 的 --color-bg / --color-fg；边框与分隔线用半透明中性灰，明暗主题下都不刺眼。
+  // 强调色与右下控制面板、toast 同源（#2f6feb）。不用 color-mix()/oklch()，企业环境的浏览器版本可能偏旧。
+  const PG4_ACCENT = "#2f6feb";
+  const GRID_COPY_CSS = `
+.pg4-menu { position: fixed; z-index: 999999; box-sizing: border-box; min-width: 232px; max-width: 300px;
+  padding: 0; overflow: hidden; font-family: inherit; font-size: 12px; line-height: 1.35; user-select: none;
+  color: var(--color-fg,#212529); background: var(--color-bg,#fff);
+  border: 1px solid rgba(127,127,127,.34); border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.16), 0 10px 24px -8px rgba(0,0,0,.36);
+  animation: pg4-menu-in .12s ease-out; }
+@keyframes pg4-menu-in { from { opacity: 0; transform: translateY(-2px) scale(.99); } }
+@media (prefers-reduced-motion: reduce) { .pg4-menu { animation: none; } }
+.pg4-menu-head { display: flex; align-items: center; gap: 6px; padding: 4px 9px;
+  border-bottom: 1px solid rgba(127,127,127,.28); border-left: 3px solid ${PG4_ACCENT};
+  background: linear-gradient(90deg, rgba(47,111,235,.13), rgba(47,111,235,0) 72%); }
+.pg4-menu-tag { flex: none; padding: 0 3px; border-radius: 3px; background: ${PG4_ACCENT}; color: #fff;
+  font-size: 8px; font-weight: 700; letter-spacing: .06em; }
+.pg4-menu-title { font-weight: 600; }
+.pg4-menu-count { margin-left: auto; font-family: ui-monospace, Consolas, monospace; font-size: 10px; opacity: .6; }
+.pg4-menu-grp { padding: 3px 12px 0; font-size: 9px; font-weight: 600; letter-spacing: .09em;
+  text-transform: uppercase; opacity: .55; }
+.pg4-menu-rule { height: 1px; margin: 3px 0; background: rgba(127,127,127,.28); }
+.pg4-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
+  margin: 0; padding: 3px 10px; border: 0; border-left: 2px solid transparent; background: transparent;
+  color: inherit; font: inherit; line-height: inherit; text-align: left; cursor: pointer; }
+.pg4-menu-item:hover, .pg4-menu-item:focus { outline: none;
+  background: rgba(47,111,235,.11); border-left-color: ${PG4_ACCENT}; }
+.pg4-menu-item:hover .pg4-menu-ic, .pg4-menu-item:focus .pg4-menu-ic { color: ${PG4_ACCENT}; }
+.pg4-menu-ic { flex: none; width: 14px; height: 14px; opacity: .8; }
+.pg4-menu-ic svg { display: block; width: 100%; height: 100%; }
+.pg4-menu-label { display: flex; flex-direction: column; min-width: 0; }
+.pg4-menu-label i { font-style: normal; font-size: 10px; opacity: .6; }
+.pg4-menu-hint { flex: none; margin-left: auto; padding: 0 4px; border-radius: 3px;
+  border: 1px solid rgba(127,127,127,.34); font-family: ui-monospace, Consolas, monospace;
+  font-size: 9.5px; opacity: .62; }
+.pg4-menu-foot { padding: 4px 12px; font-size: 9.5px; opacity: .58;
+  border-top: 1px solid rgba(127,127,127,.24); background: rgba(127,127,127,.07); }`;
+
+  // 菜单图标：15px 下要能分辨，用「表头色带」区分是否含列名，SQL 图标用尖括号。
+  const MENU_ICON = {
+    withHeaders: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><rect x="2.7" y="3.2" width="10.6" height="2.7" rx="0.7" fill="currentColor" stroke="none" opacity=".5"/><path d="M2 9.4h12M2 12.2h12"/></svg>',
+    data: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.2h12M2 9.4h12M2 12.2h12"/></svg>',
+    headers: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><rect x="2.7" y="3.2" width="10.6" height="2.7" rx="0.7" fill="currentColor" stroke="none" opacity=".5"/><path d="M6.2 3.2v2.7M9.8 3.2v2.7"/></svg>',
+    sql: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.6 4.6 5.1 8l-2.5 3.4M13.4 4.6 10.9 8l2.5 3.4M6.9 12.9 9.1 3.1"/></svg>',
+  };
 
   function installGridCopyHook(win) {
     if (win.__pg4GridCopyHook === GRID_HOOK_REV) return;
@@ -2505,15 +2552,6 @@
       } catch (e) {
         dbg("CsvHelper hook 失败", e);
       }
-    }
-
-    function findCopyButton(doc, titles) {
-      const buttons = Array.from(doc.querySelectorAll("#id-dataoutput button"));
-      return buttons.find((b) => titles.some((x) => b.getAttribute("data-label")?.toLowerCase() === x.toLowerCase()))
-        || buttons.find((b) => {
-        const t = b.getAttribute("title") || b.getAttribute("aria-label") || "";
-        return titles.some((x) => t === x || t.toLowerCase() === x.toLowerCase() || t.includes(x));
-      });
     }
 
     // 补丁键盘快捷键：当焦点在结果网格单元格上按 Ctrl+C / Cmd+C 时，触发复制操作
@@ -2782,42 +2820,111 @@
     }
 
     let activeMenu = null;
-    let menuTrigger = null;
     const hideMenu = () => {
-      if (activeMenu) {
-        activeMenu.remove();
-        activeMenu = null;
-      }
-      menuTrigger?.setAttribute("aria-expanded", "false");
-      menuTrigger = null;
+      activeMenu?.remove();
+      activeMenu = null;
     };
 
-    function showInMenu(doc, x, y) {
-      const selData = extractGridSelection(doc);
-      if (!selData || !selData.rows.length || !selData.cols.length) return;
-      hideMenu();
-
+    function createMenu(doc) {
       const menu = doc.createElement("div");
-      menu.className = "pg4-grid-context-menu";
-      menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:999999;background:var(--color-bg,#fff);color:var(--color-fg,#212121);border:1px solid rgba(127,127,127,.3);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.2);padding:4px 0;min-width:180px;font-size:12px;font-family:inherit;user-select:none;`;
+      menu.className = "pg4-menu pg4-grid-context-menu";
+      return menu;
+    }
 
-      const itemIn = doc.createElement("div");
-      itemIn.style.cssText = "padding:7px 14px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:background .15s;";
-      const colLabel = selData.cols.length === 1 ? escapeHtml(selData.cols[0].name || selData.cols[0].key) : `${selData.cols.length} 列`;
-      itemIn.innerHTML = `<span>复制为 <b>IN (...)</b> 条件</span><span style="opacity:.6;font-size:11px;margin-left:8px">${selData.rows.length} 项 · ${colLabel}</span>`;
-      itemIn.onmouseenter = () => { itemIn.style.background = "rgba(127,127,127,.15)"; };
-      itemIn.onmouseleave = () => { itemIn.style.background = "transparent"; };
-      itemIn.onclick = () => {
-        copySelectionAsIn(doc);
-        hideMenu();
-      };
-      menu.appendChild(itemIn);
-      doc.body.appendChild(menu);
-      activeMenu = menu;
+    function addMenuHead(doc, menu, title, count) {
+      const head = doc.createElement("div");
+      head.className = "pg4-menu-head";
+      head.innerHTML = `<span class="pg4-menu-tag">PG4</span><span class="pg4-menu-title">${escapeHtml(title)}</span>`
+        + `<span class="pg4-menu-count">${escapeHtml(count || "")}</span>`;
+      menu.appendChild(head);
+    }
 
+    function addMenuItem(doc, menu, { mode, icon, label, sub, hint }) {
+      const item = doc.createElement("button");
+      item.type = "button";
+      item.setAttribute("role", "menuitem");
+      item.className = "pg4-menu-item";
+      item.dataset.pg4CopyMode = mode;
+      item.innerHTML = `<span class="pg4-menu-ic">${MENU_ICON[icon] || MENU_ICON.data}</span>`
+        + `<span class="pg4-menu-label"><span>${escapeHtml(label)}</span>`
+        + (sub ? `<i>${escapeHtml(sub)}</i>` : "") + "</span>"
+        + (hint ? `<span class="pg4-menu-hint">${escapeHtml(hint)}</span>` : "");
+      menu.appendChild(item);
+      return item;
+    }
+
+    /** 选区摘要，如「12 行 × 1 列 · id」，用于菜单头部与 IN 条目提示。 */
+    function selectionSummary(doc) {
+      const sel = extractGridSelection(doc);
+      if (!sel || !sel.rows.length || !sel.cols.length) return null;
+      const colLabel = sel.cols.length === 1
+        ? (sel.cols[0].name || sel.cols[0].key || "")
+        : `${sel.cols.length} 列`;
+      return { rows: sel.rows.length, cols: sel.cols.length, colLabel,
+        text: `${sel.rows.length} 行 × ${sel.cols.length} 列 · ${colLabel}` };
+    }
+
+    function clampToViewport(menu) {
       const r = menu.getBoundingClientRect();
       if (r.right > win.innerWidth) menu.style.left = `${Math.max(0, win.innerWidth - r.width - 8)}px`;
       if (r.bottom > win.innerHeight) menu.style.top = `${Math.max(0, win.innerHeight - r.height - 8)}px`;
+    }
+
+    /**
+     * 结果区右键菜单：完整复制选项。
+     * 工具栏的「复制 / 复制选项」保持 pgAdmin 原版，我们只在右键这一处提供入口。
+     */
+    function showCopyMenu(doc, x, y) {
+      const sum = selectionSummary(doc);
+      if (!sum) return;
+      hideMenu();
+
+      const menu = createMenu(doc);
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+      menu.setAttribute("role", "menu");
+      menu.setAttribute("aria-label", "复制选项");
+      addMenuHead(doc, menu, "复制选项", sum.text);
+      const choices = [
+        ["withHeaders", "复制列名和数据", "含表头 · 制表符分隔", "默认"],
+        ["data", "仅复制数据", "不含表头"],
+        ["headers", "仅复制列名", "单行 · 制表符分隔"],
+      ];
+      for (const [mode, label, sub, hint] of choices) {
+        addMenuItem(doc, menu, { mode, icon: mode, label, sub, hint });
+      }
+      const rule = doc.createElement("div");
+      rule.className = "pg4-menu-rule";
+      rule.setAttribute("role", "separator");
+      menu.appendChild(rule);
+      const grp = doc.createElement("div");
+      grp.className = "pg4-menu-grp";
+      grp.textContent = "SQL 片段";
+      menu.appendChild(grp);
+      addMenuItem(doc, menu, {
+        mode: "in", icon: "sql", label: "复制为 IN (…) 条件",
+        sub: `去重 · 带引号 · ${sum.colLabel}`, hint: `${sum.rows} 项`,
+      });
+      const foot = doc.createElement("div");
+      foot.className = "pg4-menu-foot";
+      foot.textContent = "方向键选择 · Enter 复制 · Esc 关闭";
+      menu.appendChild(foot);
+
+      doc.body.appendChild(menu);
+      activeMenu = menu;
+      clampToViewport(menu);
+      menu.querySelector("button")?.focus();
+      menu.addEventListener("keydown", (ev) => {
+        const items = [...menu.querySelectorAll('[role="menuitem"]')];
+        const index = items.indexOf(doc.activeElement);
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          hideMenu();
+        } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+          ev.preventDefault();
+          items[(index + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+        } else if (ev.key === "Tab") hideMenu();
+      });
     }
 
     // 右键 mousedown 会走 react-data-grid 的选中逻辑，把框选 / 整列收成单格。
@@ -2847,134 +2954,26 @@
       if (!selData || !selData.rows.length || !selData.cols.length) return;
       ev.preventDefault();
       ev.stopPropagation();
-      showInMenu(doc, ev.clientX, ev.clientY);
+      showCopyMenu(doc, ev.clientX, ev.clientY);
     };
 
-    function showCopyMenu(doc, button) {
-      hideMenu();
-      const menu = doc.createElement("div");
-      menu.className = "pg4-grid-context-menu";
-      menu.setAttribute("role", "menu");
-      menu.setAttribute("aria-label", "复制选项");
-      menu.style.cssText = "position:fixed;z-index:999999;background:var(--color-bg,#fff);color:var(--color-fg,#212121);border:1px solid rgba(127,127,127,.3);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.2);padding:4px 0;min-width:196px;font-size:12px;font-family:inherit;";
-      const choices = [
-        ["data", "仅复制数据"],
-        ["withHeaders", "复制列名和数据"],
-        ["headers", "仅复制列名"],
-        ["in", "复制为 IN 条件"],
-      ];
-      choices.forEach(([mode, label], index) => {
-        if (index === 3) {
-          const divider = doc.createElement("div");
-          divider.setAttribute("role", "separator");
-          divider.style.cssText = "border-top:1px solid rgba(127,127,127,.25);margin:4px 0";
-          menu.appendChild(divider);
-        }
-        const item = doc.createElement("button");
-        item.type = "button";
-        item.setAttribute("role", "menuitem");
-        item.dataset.pg4CopyMode = mode;
-        item.textContent = label;
-        item.style.cssText = "display:block;width:100%;padding:7px 12px;text-align:left;border:0;background:transparent;color:inherit;cursor:pointer;font:inherit";
-        item.onmouseenter = () => { item.style.background = "rgba(127,127,127,.15)"; };
-        item.onmouseleave = () => { item.style.background = "transparent"; };
-        menu.appendChild(item);
-      });
-      doc.body.appendChild(menu);
-      activeMenu = menu;
-      menuTrigger = button;
-      const rect = button.getBoundingClientRect();
-      const size = menu.getBoundingClientRect();
-      menu.style.left = `${Math.max(0, Math.min(rect.right - size.width, win.innerWidth - size.width - 8))}px`;
-      menu.style.top = `${rect.bottom + size.height > win.innerHeight ? Math.max(0, rect.top - size.height) : rect.bottom}px`;
-      button.setAttribute("aria-expanded", "true");
-      menu.querySelector("button")?.focus();
-      menu.addEventListener("keydown", (ev) => {
-        const items = [...menu.querySelectorAll('[role="menuitem"]')];
-        const index = items.indexOf(doc.activeElement);
-        if (ev.key === "Escape") {
-          ev.preventDefault();
-          hideMenu();
-          button.focus();
-        } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-          ev.preventDefault();
-          items[(index + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
-        } else if (ev.key === "Tab") hideMenu();
-      });
+    // 菜单样式一次性注入本 frame；unhook 时按 id 摘掉。
+    function ensureMenuStyle(doc) {
+      if (doc.getElementById("pg4-grid-menu-style")) return;
+      const style = doc.createElement("style");
+      style.id = "pg4-grid-menu-style";
+      style.textContent = GRID_COPY_CSS;
+      doc.head.appendChild(style);
     }
-
-    function ensureCopyToolbar(doc) {
-      if (!doc.querySelector(".rdg")) return;
-      const copyBtn = findCopyButton(doc, ["复制", "Copy"]);
-      if (!copyBtn) return;
-      const group = copyBtn.closest(".MuiButtonGroup-root");
-      if (!group) return;
-      const copyOptBtn = findCopyButton(doc, ["复制选项", "Copy options"]);
-      if (!CsvClass || !copyOptBtn || copyOptBtn.parentNode !== group) return;
-      if (!copyBtn.hasAttribute("data-pg4-original-title")) {
-        copyBtn.setAttribute("data-pg4-original-title", copyBtn.title);
-        if (copyBtn.hasAttribute("title")) copyBtn.setAttribute("data-pg4-had-title", "");
-      }
-      copyBtn.title = "复制列名和数据";
-      if (!copyOptBtn.hasAttribute("data-pg4-original-title")) {
-        copyOptBtn.setAttribute("data-pg4-original-title", copyOptBtn.title);
-        if (copyOptBtn.hasAttribute("title")) copyOptBtn.setAttribute("data-pg4-had-title", "");
-      }
-      copyOptBtn.title = "Modified · PG4 Assist 复制选项";
-      for (const element of [copyBtn, copyBtn.parentElement, copyOptBtn]) {
-        if (!element.hasAttribute("data-pg4-original-label")) {
-          element.setAttribute("data-pg4-original-label", element.getAttribute("aria-label") ?? "");
-          if (element.hasAttribute("aria-label")) element.setAttribute("data-pg4-had-label", "");
-        }
-      }
-      copyBtn.setAttribute("aria-label", "复制列名和数据");
-      if (copyBtn.parentElement.hasAttribute("data-pg4-had-label")) copyBtn.parentElement.setAttribute("aria-label", "复制列名和数据");
-      copyOptBtn.setAttribute("aria-label", "复制选项");
-      if (!doc.getElementById("pg4-copy-modified-style")) {
-        const style = doc.createElement("style");
-        style.id = "pg4-copy-modified-style";
-        style.textContent = `.pg4-copy-modified { min-width: 48px !important; width: 48px; padding: 2px 5px !important; gap: 2px; background: #356d68 !important; color: #fff !important; }
-      .pg4-copy-modified:hover { background: #285752 !important; }
-      .pg4-copy-modified::before { content: "MOD"; order: -1; font: 700 9px/1 sans-serif; pointer-events: none; }
-      .pg4-copy-modified > svg { width: 12px; height: 12px; flex: none; }`;
-        doc.head.appendChild(style);
-      }
-      copyOptBtn.classList.add("pg4-copy-modified");
-      group.querySelectorAll(".pg4-copy-in-btn").forEach((button) => button.remove());
-    }
-
-    let toolbarObserver = null;
-    const syncToolbar = () => {
-      try { ensureCopyToolbar(win.document); } catch { /* ignore */ }
-    };
 
     const onDocClick = (ev) => {
       const el = ev.target && (ev.target.nodeType === 1 ? ev.target : ev.target.parentElement);
       const item = el?.closest("[data-pg4-copy-mode]");
-      if (item && activeMenu?.contains(item)) {
-        ev.preventDefault();
-        ev.stopImmediatePropagation();
-        const trigger = menuTrigger;
-        copyGridSelection(win.document, item.dataset.pg4CopyMode);
-        hideMenu();
-        trigger?.focus({ preventScroll: true });
-        return;
-      }
-      const btn = el?.closest("button");
-      if (!btn || !win.document.querySelector(".rdg")) return;
-      const copyBtn = findCopyButton(win.document, ["复制", "Copy"]);
-      const group = copyBtn?.closest(".MuiButtonGroup-root");
-      const optionsBtn = findCopyButton(win.document, ["复制选项", "Copy options"]);
-      if (!CsvClass || !group || optionsBtn?.parentNode !== group || (btn !== optionsBtn && btn !== copyBtn)) return;
+      if (!item || !activeMenu?.contains(item)) return;
       ev.preventDefault();
       ev.stopImmediatePropagation();
-      if (btn === optionsBtn) {
-        if (activeMenu?.getAttribute("role") === "menu") hideMenu();
-        else showCopyMenu(win.document, btn);
-      } else if (btn === copyBtn) {
-        hideMenu();
-        copyGridSelection(win.document, "withHeaders");
-      }
+      copyGridSelection(win.document, item.dataset.pg4CopyMode);
+      hideMenu();
     };
 
     // 点菜单外面收起菜单。必须具名：匿名函数拿不到引用，
@@ -2989,11 +2988,7 @@
       win.addEventListener("contextmenu", onContextMenu, true);
       win.addEventListener("click", onDocClick, true);
       win.addEventListener("pointerdown", onOutsidePointerDown, true);
-      syncToolbar();
-      if (win.document && win.document.body) {
-        toolbarObserver = new win.MutationObserver(debounce(syncToolbar, 250));
-        toolbarObserver.observe(win.document.body, { childList: true, subtree: true });
-      }
+      if (win.document?.head) ensureMenuStyle(win.document);
     } catch { /* ignore */ }
 
     win.__pg4GridCopyHook = GRID_HOOK_REV;
@@ -3005,7 +3000,9 @@
         win.removeEventListener("click", onDocClick, true);
         win.removeEventListener("pointerdown", onOutsidePointerDown, true);
         hideMenu();
-        if (toolbarObserver) toolbarObserver.disconnect();
+        // 以下几段清理 rev<=10 遗留的工具栏改写（改色 class、被覆盖的 title / aria-label、
+        // 早期版本插入的独立 IN 按钮、旧 id 的样式节点）。当前版本不再改写工具栏，但重跑时要还原旧痕迹。
+        win.document?.getElementById("pg4-grid-menu-style")?.remove();
         win.document?.getElementById("pg4-copy-modified-style")?.remove();
         win.document?.querySelectorAll(".pg4-copy-modified").forEach((button) => button.classList.remove("pg4-copy-modified"));
         win.document?.querySelectorAll("[data-pg4-original-title], [data-pg4-original-label]").forEach((element) => {
