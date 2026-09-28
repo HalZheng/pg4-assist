@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.3.0";
+  const VERSION = "2.4.0";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1178,7 +1178,8 @@
    *   kind: string, from: number, replaceFrom: number, hadOpenQuote: boolean,
    *   typed: string, qualifier: {name:string,quoted:boolean}|null,
    *   scope: Map<string, Relation>, scopeList: Relation[], clause: string|null,
-   *   afterJoinOn: boolean, insertColumns: Relation|null, stmtFrom: number, stmtTo: number
+   *   afterJoinOn: boolean, insertColumns: Relation|null, stmtFrom: number, stmtTo: number,
+   *   stmtRefs: string[]  // 语句内出现过的表名引用（无论能否在快照中解析，含 CTE 名）
    * }}
    */
   function analyzeContext(docText, pos, graph, baseOverride) {
@@ -1263,7 +1264,8 @@
     // 收集 FROM / JOIN / UPDATE / INTO 引入的关系与别名
     const scope = new Map();
     const scopeList = [];
-    if (graph) collectScope(stmt, graph, scope, scopeList);
+    const stmtRefs = new Set();
+    if (graph) collectScope(stmt, graph, scope, scopeList, stmtRefs);
 
     // 当前子句
     let clause = null;
@@ -1330,6 +1332,7 @@
       qualifier,
       scope,
       scopeList,
+      stmtRefs: [...stmtRefs],
       afterJoinOn,
       insertColumns,
       stmtFrom: (stmt[0] ? stmt[0].from : 0) + base,
@@ -1348,8 +1351,12 @@
     return -1;
   }
 
-  /** 扫描语句里的 FROM / JOIN / UPDATE / INTO，登记关系与别名 */
-  function collectScope(stmt, graph, scope, scopeList) {
+  /**
+   * 扫描语句里的 FROM / JOIN / UPDATE / INTO，登记关系与别名。
+   * stmtRefs（可选 Set）：无论关系能否在快照中解析，都登记语句内出现过的表名引用 ——
+   * 供调用方判断「当前语句是否已经涉及了某些表」（含 CTE 名、不在快照里的表）。
+   */
+  function collectScope(stmt, graph, scope, scopeList, stmtRefs) {
     const ALIAS_STOP = new Set([
       "on", "where", "join", "inner", "left", "right", "full", "cross", "group", "order",
       "having", "limit", "offset", "union", "except", "intersect", "set", "values",
@@ -1361,9 +1368,10 @@
       let j = i + 1;
       for (;;) {
         if (kw(stmt[j]) === "only") j++;
-        if (stmt[j] && stmt[j].text === "(") break; // 子查询：跳过
+        if (stmt[j] && stmt[j].text === "(") break; // 子查询：跳过（子查询里的 FROM 由外层循环继续扫到）
         const qn = readQualified(stmt, j);
         if (!qn) break;
+        if (stmtRefs && qn.name) stmtRefs.add(qn.name);
         const res = resolveRelation(graph, qn.name, qn.quoted, qn.schema);
         const rel = res.rel || res.caseMismatch;
         j = qn.next;
@@ -1522,13 +1530,10 @@
         const alias = multi ? aliasOf(info.scope, rel) : null;
         for (const c of rel.columns) pushColumn(rel, c, colBase - c.ordinal * 0.01, alias);
       }
-      if (!info.scopeList.length) {
-        // 还没写 FROM：给全库列名（按出现次数收敛，避免刷屏）
-        for (const [, arr] of ix.colBySearch) {
-          if (arr.length > 3) continue;
-          for (const { rel, col } of arr.slice(0, 2)) pushColumn(rel, col, 30);
-        }
-      }
+      // 列候选严格限定为当前语句涉及的表（scopeList）。
+      // 不再给「全库列名」兜底（2026-09-28 用户决定）：语句还没写 FROM、或引用的
+      // 表/CTE 不在快照里时，全库兜底只会把同窗口其他语句与无关表的列混进来。
+      // 想在没写 FROM 时拿列，仍可显式写 qualifier（t.）—— QUALIFIED 分支的全库猜保留。
     }
 
     // ── 关系 ─────────────────────────────────────────────────────────────
@@ -2441,8 +2446,9 @@
    * 1. 拦截 pgAdmin Webpack 中的 CsvHelper (copyRowsToCsv)，当复制单个单元格且未带表头时，
    *    将去除 CSV 引号包装的原始纯文本写入剪贴板（避免如 "hello" 复制为带外层双引号）。
    * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
+   * 3. 结果单元格右键菜单：列名/数据/IN 条件之外的导出格式（CSV / JSON / Markdown）。
    */
-  const GRID_HOOK_REV = 11;
+  const GRID_HOOK_REV = 12;
 
   // 结果区右键菜单的外观。不碰 pgAdmin 的工具栏按钮，所以配色只需满足两点：
   // 底/字色沿用 rdg 的 --color-bg / --color-fg；边框与分隔线用半透明中性灰，明暗主题下都不刺眼。
@@ -2489,6 +2495,9 @@
     data: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6.2h12M2 9.4h12M2 12.2h12"/></svg>',
     headers: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><rect x="2.7" y="3.2" width="10.6" height="2.7" rx="0.7" fill="currentColor" stroke="none" opacity=".5"/><path d="M6.2 3.2v2.7M9.8 3.2v2.7"/></svg>',
     sql: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.6 4.6 5.1 8l-2.5 3.4M13.4 4.6 10.9 8l2.5 3.4M6.9 12.9 9.1 3.1"/></svg>',
+    csv: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.5 2.5v11M10.5 2.5v11M2 6h12M2 10.2h12"/></svg>',
+    json: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M5.8 2.8c-1.5 0-1.9.9-1.9 2v1.4c0 1-.5 1.7-1.4 2 .9.3 1.4 1 1.4 2v1.4c0 1.1.4 2 1.9 2"/><path d="M10.2 2.8c1.5 0 1.9.9 1.9 2v1.4c0 1 .5 1.7 1.4 2-.9.3-1.4 1-1.4 2v1.4c0 1.1-.4 2-1.9 2"/></svg>',
+    markdown: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="3.5" width="13" height="9" rx="1.5"/><path d="M4 10.5V6l2.1 2.4L8.2 6v4.5M11.6 6.2v3.4M10.2 8.4l1.4 1.6 1.4-1.6"/></svg>',
   };
 
   function installGridCopyHook(win) {
@@ -2782,8 +2791,65 @@
       return ok;
     }
 
+    // ── 导出格式化（CSV / JSON / Markdown）：纯文本拼装，不依赖 pgAdmin 的 CsvHelper ──
+    // NULL 一律输出为空字符串；jsonb / 数组等结构化值转 JSON 文本。
+    function exportCellText(val) {
+      if (val === null || val === undefined) return "";
+      return typeof val === "object" ? JSON.stringify(val) : String(val);
+    }
+    function csvEscapeCell(s) {
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    // 对标 DBeaver / DataGrip「复制为 CSV」：逗号分隔、含表头、RFC 4180 转义、CRLF 行尾（Excel 直接粘贴友好）。
+    function formatRowsAsCsv(rows2, cols2) {
+      const head = cols2.map((c) => csvEscapeCell(exportCellText(c.name))).join(",");
+      const body = rows2.map((row) => cols2.map((c) => csvEscapeCell(exportCellText(row[c.key]))).join(","));
+      return [head, ...body].join("\r\n");
+    }
+    // 对标 DataGrip「Copy as JSON」：对象数组，每个对象一行；数值列转 number、boolean 列转
+    // true/false、NULL → null、jsonb → 嵌套对象。超出安全整数范围的整数保持字符串防精度丢失。
+    function jsonCellValue(col, val) {
+      if (val === null || val === undefined) return null;
+      if (typeof val === "object") return val;
+      const s = String(val);
+      const t = s.trim();
+      if (/bool/i.test(col.type || col.cell || "") && /^(true|false)$/i.test(t)) {
+        return t.toLowerCase() === "true";
+      }
+      if (isNumericColumn(col) && t !== "" && !isNaN(Number(t))) {
+        const n = Number(t);
+        if (Number.isSafeInteger(n) || n !== Math.floor(n)) return n;
+        return s;
+      }
+      return s;
+    }
+    function formatRowsAsJson(rows2, cols2) {
+      const objs = rows2.map((row) => {
+        const o = {};
+        for (const c of cols2) o[c.name] = jsonCellValue(c, row[c.key]);
+        return o;
+      });
+      return "[\n" + objs.map((o) => "  " + JSON.stringify(o)).join(",\n") + "\n]";
+    }
+    // GFM 表格：| 转义为 \|，换行转 <br>。
+    function mdEscapeCell(s) {
+      return s.replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
+    }
+    function formatRowsAsMarkdown(rows2, cols2) {
+      const head = "| " + cols2.map((c) => mdEscapeCell(exportCellText(c.name))).join(" | ") + " |";
+      const rule = "| " + cols2.map(() => "---").join(" | ") + " |";
+      const body = rows2.map((row) =>
+        "| " + cols2.map((c) => mdEscapeCell(exportCellText(row[c.key]))).join(" | ") + " |");
+      return [head, rule, ...body].join("\n");
+    }
+
     function formatGridCopy(rows, cols, mode) {
-      if (!CsvClass || !cols.length) return null;
+      if (!cols.length) return null;
+      // 导出格式不依赖 CsvHelper：webpack 里定位不到它时也照常可用
+      if (mode === "csv") return formatRowsAsCsv(rows, cols);
+      if (mode === "json") return formatRowsAsJson(rows, cols);
+      if (mode === "markdown") return formatRowsAsMarkdown(rows, cols);
+      if (!CsvClass) return null;
       const csv = new CsvClass();
       const separator = csv.CSVOptions.field_separator;
       const headers = cols.map((col) => csv.csvCell(col.name, col, true)).join(separator);
@@ -2796,6 +2862,11 @@
       const body = rows.map((row) => cols.map((col) => csv.csvCell(row[col.key], col)).join(separator)).join("\n");
       return mode === "withHeaders" ? headers + "\n" + body : body;
     }
+
+    const COPY_MODE_LABEL = {
+      in: " IN 条件", csv: " CSV", json: " JSON", markdown: " Markdown",
+      headers: "列名", withHeaders: "列名和数据", data: "数据",
+    };
 
     function copyGridSelection(doc, mode) {
       const core = window[NS];
@@ -2811,7 +2882,7 @@
         core && core.toast("复制失败：浏览器未允许写入剪贴板或复制格式不可用");
         return false;
       }
-      core && core.toast(`已复制${mode === "in" ? " IN 条件" : mode === "headers" ? "列名" : mode === "withHeaders" ? "列名和数据" : "数据"}`);
+      core && core.toast(`已复制${COPY_MODE_LABEL[mode] || "数据"}`);
       return true;
     }
 
@@ -2891,6 +2962,23 @@
         ["headers", "仅复制列名", "单行 · 制表符分隔"],
       ];
       for (const [mode, label, sub, hint] of choices) {
+        addMenuItem(doc, menu, { mode, icon: mode, label, sub, hint });
+      }
+      // 导出格式组：不依赖 pgAdmin CsvHelper 的独立格式化
+      const ruleFmt = doc.createElement("div");
+      ruleFmt.className = "pg4-menu-rule";
+      ruleFmt.setAttribute("role", "separator");
+      menu.appendChild(ruleFmt);
+      const grpFmt = doc.createElement("div");
+      grpFmt.className = "pg4-menu-grp";
+      grpFmt.textContent = "导出格式";
+      menu.appendChild(grpFmt);
+      const fmtChoices = [
+        ["csv", "复制为 CSV", "含表头 · 逗号分隔", ""],
+        ["json", "复制为 JSON", "对象数组 · 保留类型", `${sum.rows} 行`],
+        ["markdown", "复制为 Markdown", "GFM 表格 · 含表头", ""],
+      ];
+      for (const [mode, label, sub, hint] of fmtChoices) {
         addMenuItem(doc, menu, { mode, icon: mode, label, sub, hint });
       }
       const rule = doc.createElement("div");
