@@ -31,7 +31,22 @@
   （当前这台：`origin → gh-proxy 镜像的 GitHub`，无 GitLab、无 `github` 远端）。
   任何涉及 push / 建分支 / 清理远端的操作前先 `git remote -v` 确认。
   失效条件：当台机器补配远端后以实测为准；**单远端不构成"双远端"那条记忆有误的证据**。
+  - 更正（2026-09-28）：本机**已不是单远端**——当日本机新增 `github → https://github.com/HalZheng/pg4-assist.git`，
+    推送改走它（见下「推送通道」）。原文「无 `github` 远端」仅对 2026-09-28 之前有效。
 - 本机 git 走 GitHub 时依赖环境变量代理，schannel 会报 `CRYPT_E_NO_REVOCATION_CHECK`。
+  - 更正（2026-09-28）：本次推送时 `$env:https_proxy` / `$env:HTTPS_PROXY` **为空**且 `curl https://github.com` 直连 200，
+    未用到环境变量代理；不排除时段性直连不可达，需要代理的情形仍以本条为准。
+- **推送通道（2026-09-28 实测）**：本机 `git push` 走 **`github` 远端**能够成功；走 `origin`（gh-proxy）会报
+  `remote: Invalid username or token. Password authentication is not supported for Git operations.`
+  - 原因：凭据管理器里 gh-proxy 存的是**密码型**凭据（GitHub 早已不支持 git 密码认证）；
+    而 GCM（`git credential-manager github list`）里 GitHub 账号 `HalZheng` 的凭据有效。
+  - 证据：`git push github main` → `0e49cfe..04603ee` 成功；`git ls-remote github main` 与本地一致；
+    `git fetch origin` 后 `origin/main` 也同步到 `04603ee`（gh-proxy 读路径正常、不滞后）。
+  - 适用范围：仅本机；换机器以 `git remote -v` + 实测为准。
+    失效条件：gh-proxy 的凭据换成 PAT、或凭据管理器被清空时需重测。
+- **本机没有 `gh` CLI**（`gh --version` → CommandNotFound）：GitHub 插件的 `yeet`、`gh-fix-ci` 等技能依赖 `gh`，本机不可用。
+  Trae code-mode 沙箱（`integrated_code_mode`）内 `run_mcp` **看不到**插件 MCP server（`mcp_plugin_GitHub_github` 等候选名均报
+  `MCP server is not found`）；需要 API 级 GitHub 操作时只能由主会话调用 MCP 工具。
 - `.gitignore` 忽略了 `.vscode/`：**不要**把需要团队共享的配置放进 `.vscode/`。
 
 ## 代码层（摘要，详见 AGENTS.md「关键坑」）

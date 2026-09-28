@@ -44,6 +44,8 @@
     只配了 GitHub 单远端（`origin → https://gh-proxy.com/https://github.com/HalZheng/pg4-assist.git`，
     即 GitHub 的镜像代理，无 GitLab）。**不要**据此判定本条记忆有误，也**不要用单机反推全局**；
     动手推送前先 `git remote -v` 看当台机器的实际拓扑。
+    - 2026-09-28 更新（本机）：本机已新增 `github → 真实 GitHub` 远端，推送改走 `github`；
+      `origin`（gh-proxy）保留作匿名 fetch。细节与证据见 `pitfalls.md`「推送通道」。
 - 本机 git 访问 GitHub 走环境变量代理（`$https_proxy`，端口会变），不是 git 配置。
 
 ## 记忆协议本身
