@@ -22,6 +22,15 @@
 
 - **Copilot `/memories/repo/` 不在工作区内**（在 workspaceStorage 下），无法被本仓库 git 追踪。
   换工作区路径会换 hash 目录，等于记忆"消失"。重要结论必须回写 `docs/agent-memory/`。
+- **Qoder 的记忆目录同样在工作区外**：`~/.qoder-cn/memory/`（用户级）与
+  `~/.qoder-cn/projects/<工作区slug>/memory/`（项目级，slug 由路径转写而来）。
+  2026-09-26 核查时两者均为空。**不要**把结论只写在那里；Qoder 原生读 `AGENTS.md`，
+  因此仓库内不需要为它另建 stub，私有目录里只放指向 `docs/agent-memory/` 的指针。
+- **远端拓扑按机器而异，不要凭记忆假设推送目标**：项目级约定是双远端
+  （`github`=公开 GitHub、`origin`=内网 GitLab，见 `decisions.md`），但部分机器只配了 GitHub 单远端
+  （当前这台：`origin → gh-proxy 镜像的 GitHub`，无 GitLab、无 `github` 远端）。
+  任何涉及 push / 建分支 / 清理远端的操作前先 `git remote -v` 确认。
+  失效条件：当台机器补配远端后以实测为准；**单远端不构成"双远端"那条记忆有误的证据**。
 - 本机 git 走 GitHub 时依赖环境变量代理，schannel 会报 `CRYPT_E_NO_REVOCATION_CHECK`。
 - `.gitignore` 忽略了 `.vscode/`：**不要**把需要团队共享的配置放进 `.vscode/`。
 
@@ -37,3 +46,10 @@
   和 `sameOriginWindow(frameEl) !== o.win`（只看前者会漏掉 iframe 导航）。
 - 例外：`watchFrameLoad` 的 load 监听器与 `attachWindow` 中子 frame 的 pointerdown **故意不摘**，
   它们每次从 `window[NS]` 取当前实例。改之前先确认这个约定。
+- **不要从「编辑区补全弹层能跟随暗色」推断自绘 DOM 也会跟随**。补全弹层由 CodeMirror 6 渲染，
+  主题来自 pgAdmin 自己注入的 `EditorView.theme`，我们没写一行配色；我们自绘的右键菜单/面板是普通 DOM，
+  只依赖 `var(--color-bg)` / `var(--color-fg)` 是否真被 pgAdmin 暗色主题重新赋值——**仓库里没记录这套主题机制**
+  （`grep "dark|theme|主题"` 在 `pg4-assist.js` 与 `docs/` 均无命中）。
+  所以：不要凭猜测硬编码一套深色色值；要改先从真机拿到主题信号。
+- 删除工具栏改写后，`__pg4GridCopyUnhook` 里那段「还原 rev≤10 遗留改写」的清理**不能顺手删**：
+  已经跑过旧版脚本的浏览器里，工具栏按钮还带着我们加的 class 和被覆盖的 title。

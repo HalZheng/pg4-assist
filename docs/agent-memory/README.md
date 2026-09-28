@@ -1,7 +1,7 @@
 # 项目记忆（跨 agent 唯一事实来源 / SSOT）
 
 本目录是 pg4-assist 的**跨 agent 项目记忆**：仓库内、可版本控制、格式中立（纯 Markdown）。
-目标是让 GitHub Copilot / Claude Code / Cursor / Trae / WorkBuddy / Codex 等工具的会话记忆不再是孤岛。
+目标是让 GitHub Copilot / Claude Code / Cursor / Trae / WorkBuddy / Qoder / Codex 等工具的会话记忆不再是孤岛。
 
 ## 为什么需要它
 
@@ -14,6 +14,7 @@
 | Cursor | `.cursor/rules/*.mdc`（旧版 `.cursorrules`） | ✅ |
 | Trae | `.trae/rules/`、`.trae/specs/` | ✅ |
 | WorkBuddy | `.workbuddy/memory/` | ✅ |
+| Qoder（CLI / IDE） | `AGENTS.md`（原生读取）+ `~/.qoder-cn/{memory,projects/<slug>/memory}/` | 前者 ✅ / 后者 ❌ 在工作区外 |
 | Codex / 多数新工具 | `AGENTS.md` | ✅ |
 
 两条硬结论：
@@ -50,6 +51,9 @@
 - `.cursor/rules/agent-memory.mdc` —— Cursor（`alwaysApply`）
 - `.trae/rules/project_rules.md` —— Trae
 - `.workbuddy/memory/README.md` —— WorkBuddy
+- Qoder —— **无需 stub**：它原生读取 `AGENTS.md`（本仓库已接入）。但它的自动记忆目录
+  （`~/.qoder-cn/memory/`、`~/.qoder-cn/projects/<工作区slug>/memory/`）在工作区之外，
+  与 Copilot 同一类问题——在那儿写结论等于其他 agent 看不到，只放指向本目录的指针。
 
 > 若某个平台的规则路径与上表不符（各版本差异较大），把对应 stub 复制到它真正读取的路径即可，
 > 内容不用改——stub 只有指针，没有正文。

@@ -9,7 +9,7 @@
 以 DevTools Snippet / 用户脚本 / Local Overrides 形式注入，适用于禁止安装浏览器扩展的环境。
 
 - 不修改 pgAdmin 后端、不创建数据库连接、不外发任何数据（离线优先）。
-- 当前交付物：`pg4-assist.js`（v2，约 3800 行，IIFE 单文件）。
+- 当前交付物：`pg4-assist.js`（v2，4000 余行，IIFE 单文件）。
 - 对外 `VERSION` 保持克制：图标、样式及连续小修不逐次升级版本号；仅在明确计划发布或用户要求时调整。
   内部 `GRID_HOOK_REV` 用于替换监听器，独立于对外版本；`CONFIG_VERSION` 的迁移要求见下文。
 - 旧实现（MV3 扩展、v1 自建 UI snippet）已归档至 `legacy/`，不要在那里加新功能。

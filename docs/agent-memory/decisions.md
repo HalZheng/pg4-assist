@@ -4,7 +4,7 @@
 
 ## 交付形态
 
-- 交付物是**单文件 `pg4-assist.js`**（IIFE，无构建、无依赖、约 3800 行）。
+- 交付物是**单文件 `pg4-assist.js`**（IIFE，无构建、无依赖，4000 余行）。
   注入方式是 DevTools Snippet / 用户脚本 / Local Overrides，不发布浏览器扩展。
 - 旧实现（MV3 扩展、v1 snippet）已归档 `legacy/`，**不要在那里加新功能**。
 - 运行环境是「禁止安装浏览器扩展」的企业环境，因此任何依赖扩展 API 的方案都不可行。
@@ -24,6 +24,13 @@
 - `completionSource` 必须用 CM6 的 `doc.sliceString()` 取窗口，
   **禁止**改回 `ctx.state.doc.toString()`（每 90 ms 复制整篇文档）。
 
+## 结果网格增强的入口约定（2026-09-26 用户决定）
+
+- 复制格式选择的**唯一入口是结果单元格右键菜单**。
+  **不要**再改写工具栏的「复制 / 复制选项」按钮：不改色、不改 title/aria-label、不拦截它们的点击。
+  理由：那是 pgAdmin 原版 UI，接管它会让工具栏变样且需要一套还原逻辑；右键菜单信息量已足够。
+- 保留在网格侧的只有：webpack CsvHelper 去引号补丁、Ctrl+C 快捷键补丁、右键菜单。
+
 ## 沟通与提交
 
 - 文档、注释、提交信息统一用**中文**（与既有仓库风格一致）。
@@ -33,6 +40,10 @@
 
 - 工作区位于 OneDrive 同步目录内；文档中不要记录本机绝对路径。
 - 双远端：`github` 指向公开 GitHub 仓库；`origin` 指向公司内网 GitLab（默认推送目标）。
+  - **适用范围（2026-09-26 用户确认）**：这是**项目级事实**，但**按机器而异**——部分机器（含当前这台）
+    只配了 GitHub 单远端（`origin → https://gh-proxy.com/https://github.com/HalZheng/pg4-assist.git`，
+    即 GitHub 的镜像代理，无 GitLab）。**不要**据此判定本条记忆有误，也**不要用单机反推全局**；
+    动手推送前先 `git remote -v` 看当台机器的实际拓扑。
 - 本机 git 访问 GitHub 走环境变量代理（`$https_proxy`，端口会变），不是 git 配置。
 
 ## 记忆协议本身
