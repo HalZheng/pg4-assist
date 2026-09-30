@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.4.0";
+  const VERSION = "2.4.1";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2825,7 +2825,7 @@
     }
     function formatRowsAsJson(rows2, cols2) {
       const objs = rows2.map((row) => {
-        const o = {};
+        const o = Object.create(null);
         for (const c of cols2) o[c.name] = jsonCellValue(c, row[c.key]);
         return o;
       });
@@ -3149,7 +3149,7 @@
       const pkCols = rel.pk.map((k) => colName(rel, k));
       const rows = [];
       rows.push(["类型", rel.kind === "table" ? "表" : rel.kind === "view" ? "视图" : rel.kind === "matview" ? "物化视图" : "外部表"]);
-      rows.push(["schema", rel.schema]);
+      rows.push(["schema", escapeHtml(rel.schema)]);
       rows.push(["列数", String(rel.columns.length)]);
       if (pkCols.length) rows.push(["主键", pkCols.map(escapeHtml).join(", ")]);
       if (rel.fks.length) rows.push(["外键", rel.fks.map((f) => `${f.columns.map((c) => colName(rel, c)).join(",")} → ${f.refTable}`).map(escapeHtml).join("<br>")]);
@@ -3482,7 +3482,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       const chk = (key, label, hint) =>
         `<div class="row"><input type="checkbox" id="c_${key}" ${c[key] ? "checked" : ""}><label for="c_${key}">${label}${hint ? `<br><span style="opacity:.5;font-size:11px">${hint}</span>` : ""}</label></div>`;
       const num = (key, label, min, max) =>
-        `<div class="row"><label for="c_${key}">${label}</label><input type="number" id="c_${key}" value="${c[key]}" min="${min}" max="${max}"></div>`;
+        `<div class="row"><label for="c_${key}">${label}</label><input type="number" id="c_${key}" value="${escapeHtml(c[key])}" min="${min}" max="${max}"></div>`;
 
       this.body.innerHTML = `
         <div class="sec"><h3>补全</h3>
@@ -3641,9 +3641,9 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
 
     async activateSnapshot(id) {
       const meta = await idbGet(ST_SNAPSHOTS, id);
-      if (!meta) return false;
+      if (this.disposed || !meta) return false;
       const row = await idbGet(ST_GRAPHS, id);
-      if (!row) return false;
+      if (this.disposed || !row) return false;
       this.graph = row.graph;
       buildIndex(this.graph);
       this.snapshotId = id;
@@ -3673,10 +3673,10 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       const id = currentConfig.activeSnapshotId;
       if (id) {
         const ok = await this.activateSnapshot(id).catch(() => false);
-        if (ok) return;
+        if (ok || this.disposed) return;
       }
       const list = await this.listSnapshots();
-      if (list.length) {
+      if (!this.disposed && list.length) {
         list.sort((a, b) => b.importedAt - a.importedAt);
         await this.activateSnapshot(list[0].id).catch(() => {});
       }
@@ -3927,6 +3927,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       document.addEventListener("keydown", this._topKeydown);
 
       await this.restoreActiveSnapshot().catch((e) => warn("恢复快照失败", e));
+      if (this.disposed) return;
       this.panel.updateFab();
       log(`PG4 Assist v${VERSION} 已启动 · 接管 ${this.sessions.size} 个编辑器 · 快照 ${this.snapshotMeta ? this.snapshotMeta.name : "（无）"}`);
       if (!this.sessions.size) {
@@ -3935,7 +3936,9 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
     }
 
     destroy() {
+      if (this.disposed) return;
       this.disposed = true;
+      clearTimeout(this._rerender);
       clearInterval(this._poll);
       document.removeEventListener("keydown", this._topKeydown);
       for (const { mo, win } of this.observers) {
@@ -3957,12 +3960,12 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       try { this.channel && this.channel.close(); } catch { /* ignore */ }
       // window.__pg4 是另一个对象（见 startHere），只删 window[NS] 不够：
       // window.__pg4.core 会一直强引用本实例，连带整份 graph 都回收不掉。
-      try { delete window.__pg4; } catch { /* ignore */ }
+      try { if (window.__pg4?.core === this) delete window.__pg4; } catch { /* ignore */ }
       this.graph = null;
       this.usageCache = null;
       this.snapshotMeta = null;
       this.panel = null;
-      delete window[NS];
+      if (window[NS] === this) delete window[NS];
       log("PG4 Assist 已卸载");
     }
   }
@@ -3992,10 +3995,10 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
 
   function serializeGraph(graph) {
     // columnByKey / __index 是运行期结构，不入库
-    const out = { version: graph.version, schemas: {} };
+    const out = { version: graph.version, schemas: Object.create(null) };
     for (const sk of Object.keys(graph.schemas)) {
       const s = graph.schemas[sk];
-      const relations = {};
+      const relations = Object.create(null);
       for (const rk of Object.keys(s.relations)) {
         const r = s.relations[rk];
         relations[rk] = {
