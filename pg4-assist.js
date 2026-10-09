@@ -17,7 +17,7 @@
  * 关键实测事实（改动前务必先读）：
  *   - Query Tool 位于**同源 iframe** /sqleditor/panel/<id>；顶层文档里 .cm-editor 数量为 0。
  *   - 外层 DIV 与 IFRAME **共用同一个 id**，getElementById 会拿到 DIV，必须用 querySelectorAll('iframe')。
- *   - cmView 挂在 **.cm-content** 上，不是 .cm-editor。
+ *   - CM6 实例挂在 **.cm-content** 上（新版 pgAdmin 为 cmTile.view，旧版为 cmView），不是 .cm-editor。
  *   - 取真 __webpack_require__ 必须走 webpackChunk.push 的第三个回调参数；
  *     绝不能自己重放 factory，那会得到 CM6 模块的副本，facet 身份不一致。
  *   - 不能 appendConfig(autocompletion({override})) —— 该版本 completionConfig 对 override
@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.4.1";
+  const VERSION = "2.4.2";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2448,7 +2448,7 @@
    * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
    * 3. 结果单元格右键菜单：列名/数据/IN 条件之外的导出格式（CSV / JSON / Markdown）。
    */
-  const GRID_HOOK_REV = 12;
+  const GRID_HOOK_REV = 14;
 
   // 结果区右键菜单的外观。不碰 pgAdmin 的工具栏按钮，所以配色只需满足两点：
   // 底/字色沿用 rdg 的 --color-bg / --color-fg；边框与分隔线用半透明中性灰，明暗主题下都不刺眼。
@@ -2610,23 +2610,26 @@
         }
 
         if (cur) {
-          let selectedRowsSet = null, selectedColsSet = null, rangeRef = null, clientPK = "__temp_PK";
-          let s = cur.memoizedState;
-          let hookIdx = 0;
-          while (s) {
-            const ms = s.memoizedState;
-            if (hookIdx === 4 && Array.isArray(ms)) rowsState = ms;
-            if (hookIdx === 5 && Array.isArray(ms)) colsState = ms;
-            if (hookIdx === 6 && ms && typeof ms === "object" && ms.current && ms.current.clientPK) {
-              clientPK = ms.current.clientPK;
-            }
-            if (hookIdx === 8 && ms instanceof win.Set) selectedRowsSet = ms;
-            if (hookIdx === 9 && ms instanceof win.Set) selectedColsSet = ms;
-            if (hookIdx === 12 && ms && typeof ms === "object" && ms !== null && "current" in ms) cellRef = ms.current;
-            if (hookIdx === 13 && ms && typeof ms === "object" && ms !== null && "current" in ms) rangeRef = ms.current;
-            s = s.next;
-            hookIdx++;
-          }
+          // pgAdmin 各构建的 hook 顺序不同，按形状识别而非固定下标。
+          const hooks = [];
+          for (let s = cur.memoizedState; s; s = s.next) hooks.push(s.memoizedState);
+          const isObj = (v) => v !== null && typeof v === "object";
+          const isColMeta = (a) => Array.isArray(a) && a.length > 0 && isObj(a[0])
+            && "key" in a[0] && "name" in a[0] && "type" in a[0];
+          const isRowArr = (a) => Array.isArray(a) && a.length > 0 && isObj(a[0]) && !isColMeta(a);
+          colsState = hooks.find((h) => isColMeta(h)) || null;
+          rowsState = hooks.find((h) => isRowArr(h)
+            && (!colsState || Object.keys(h[0]).some((k) => colsState.some((c) => c.key === k)))) || null;
+          const sets = hooks.filter((h) => h instanceof win.Set);
+          const selectedRowsSet = sets[0] || null;
+          const selectedColsSet = sets[1] || null;
+          const pkRef = hooks.find((h) => isObj(h) && isObj(h.current) && h.current.clientPK);
+          const clientPK = pkRef ? pkRef.current.clientPK : "__temp_PK";
+          const cellRefHook = hooks.find((h) => isObj(h) && Array.isArray(h.current)
+            && h.current.length === 2 && typeof h.current[0] === "number");
+          cellRef = cellRefHook ? cellRefHook.current : null;
+          const rangeRefHook = hooks.find((h) => isObj(h) && isObj(h.current) && "startColumnIdx" in h.current);
+          const rangeRef = rangeRefHook ? rangeRefHook.current : null;
           if (rowsState && colsState) {
             if (selectedRowsSet && selectedRowsSet.size > 0) {
               const rows = rowsState.filter((r) => selectedRowsSet.has(r[clientPK]));
@@ -2876,8 +2879,10 @@
         core && core.toast("请先选中结果网格中的单元格 / 列 / 行");
         return false;
       }
-      const text = mode === "in" ? formatAsInClause(selection.rows, selection.cols)
-        : formatGridCopy(selection.rows, selection.cols, mode);
+      // 单格选区的列对象可能没有 name，表头回退到 key。
+      const cols = selection.cols.map((c) => ({ ...c, name: c.name || c.key }));
+      const text = mode === "in" ? formatAsInClause(selection.rows, cols)
+        : formatGridCopy(selection.rows, cols, mode);
       if (text === null || !writeClipboard(text)) {
         core && core.toast("复制失败：浏览器未允许写入剪贴板或复制格式不可用");
         return false;
@@ -3805,7 +3810,8 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       }
       for (const el of contents) {
         if (el.__pg4Session && this.sessions.has(el.__pg4Session)) continue;
-        const cmView = el.cmView;
+        // 新版 pgAdmin 把 CM6 实例挂在 cmTile 上，旧版为 cmView。
+        const cmView = el.cmTile || el.cmView;
         const view = cmView && cmView.view;
         if (!view || typeof view.dispatch !== "function") continue;
         // pgAdmin 的「查询历史」面板也是一个 CM6 实例，但是只读的，不需要增强
