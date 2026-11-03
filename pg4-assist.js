@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.4.3";
+  const VERSION = "2.4.4";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2591,9 +2591,9 @@
    * 1. 拦截 pgAdmin Webpack 中的 CsvHelper (copyRowsToCsv)，当复制单个单元格且未带表头时，
    *    将去除 CSV 引号包装的原始纯文本写入剪贴板（避免如 "hello" 复制为带外层双引号）。
    * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
-   * 3. 结果单元格右键菜单：列名/数据/IN 条件之外的导出格式（CSV / JSON / Markdown）。
+   * 3. 结果单元格右键菜单：复制、导出格式（CSV / JSON / Markdown），以及 INSERT / UPDATE / DELETE / SELECT 生成。
    */
-  const GRID_HOOK_REV = 17;
+  const GRID_HOOK_REV = 18;
 
   // 结果区右键菜单的外观。不碰 pgAdmin 的工具栏按钮，所以配色只需满足两点：
   // 底/字色沿用 rdg 的 --color-bg / --color-fg；边框与分隔线用半透明中性灰，明暗主题下都不刺眼。
@@ -2613,8 +2613,9 @@
   background: linear-gradient(90deg, rgba(47,111,235,.13), rgba(47,111,235,0) 72%); }
 .pg4-menu-tag { flex: none; padding: 0 3px; border-radius: 3px; background: ${PG4_ACCENT}; color: #fff;
   font-size: 8px; font-weight: 700; letter-spacing: .06em; }
-.pg4-menu-title { font-weight: 600; }
-.pg4-menu-count { margin-left: auto; font-family: ui-monospace, Consolas, monospace; font-size: 10px; opacity: .6; }
+.pg4-menu-title { font-weight: 600; white-space: nowrap; }
+.pg4-menu-count { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace; font-size: 10px; opacity: .6; }
 .pg4-menu-grp { padding: 3px 12px 0; font-size: 9px; font-weight: 600; letter-spacing: .09em;
   text-transform: uppercase; opacity: .55; }
 .pg4-menu-rule { height: 1px; margin: 3px 0; background: rgba(127,127,127,.28); }
@@ -2624,6 +2625,8 @@
 .pg4-menu-item:hover, .pg4-menu-item:focus { outline: none;
   background: rgba(47,111,235,.11); border-left-color: ${PG4_ACCENT}; }
 .pg4-menu-item:hover .pg4-menu-ic, .pg4-menu-item:focus .pg4-menu-ic { color: ${PG4_ACCENT}; }
+.pg4-menu-item:disabled, .pg4-menu-item:disabled:hover, .pg4-menu-item:disabled:focus { opacity: .45; cursor: not-allowed;
+  background: transparent; border-left-color: transparent; }
 .pg4-menu-ic { flex: none; width: 14px; height: 14px; opacity: .8; }
 .pg4-menu-ic svg { display: block; width: 100%; height: 100%; }
 .pg4-menu-label { display: flex; flex-direction: column; min-width: 0; }
@@ -2881,6 +2884,9 @@
           const cell = rowEl.querySelector(`.rdg-cell[role="gridcell"][aria-colindex="${idx}"]`);
           obj[c.key] = cell ? cellDisplayValue(cell) : null;
         });
+        // 补齐未选中的列（如主键），供生成 SQL 定位行；不覆盖选中列的显示值
+        const full = rowsState && rowsState[Number(rowEl.getAttribute("aria-rowindex")) - 2];
+        if (full) for (const k of Object.keys(full)) if (!(k in obj)) obj[k] = full[k];
         return obj;
       });
       if (rows.length && cols.length) return { kind: "range", rows, cols };
@@ -3022,6 +3028,7 @@
     };
 
     function copyGridSelection(doc, mode) {
+      if (mode.startsWith("sql-")) return copySqlStatements(doc, mode);
       const core = window[NS];
       let selection = null;
       try { selection = extractGridSelection(doc); } catch (e) { dbg("extractGridSelection", e); }
@@ -3045,6 +3052,189 @@
       return copyGridSelection(doc, "in");
     }
 
+    // ── 生成 INSERT / UPDATE / DELETE / SELECT（对标 DBeaver「Generate SQL」）──
+    // 来源表取自编辑器中的单表 SELECT；UPDATE / DELETE 的主键取自 DDL 快照，无快照或无主键则禁用。
+    const SQL_ROW_LIMIT = 2000;
+    const SQL_BAN_KW = new Set(["join", "union", "intersect", "except", "group", "having", "distinct", "with", "over", "values", "lateral"]);
+    const SQL_AGG_RE = /^(count|sum|avg|min|max|array_agg|string_agg|json_agg|jsonb_agg|bool_and|bool_or|every)$/;
+    const SQL_AFTER_FROM = new Set(["where", "order", "limit", "offset", "fetch", "for"]);
+    const SQL_NUM_TYPE_RE = /^(smallint|integer|bigint|numeric|real|double precision|serial|bigserial|smallserial)$/;
+    const SQL_NUM_VAL_RE = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+
+    /** 结果来源：{ rel, tableSql } 或 { error }。 */
+    function resolveSqlSource() {
+      const core = window[NS];
+      const cands = [...(core?.sessions?.values() || [])].filter((s) => s.win === win && s.view?.dom?.isConnected);
+      const session = cands.find((s) => s.view.hasFocus)
+        || cands.find((s) => s.view.dom.getClientRects().length && s.view.state.doc.length)
+        || cands.find((s) => s.view.state.doc.length);
+      if (!session) return { error: "找不到当前编辑器" };
+      const stmts = splitStatements(tokenize(session.view.state.doc.toString(), { keepComments: false }));
+      if (stmts.length !== 1) return { error: stmts.length ? "编辑器中有多条语句" : "编辑器为空" };
+      const toks = stmts[0];
+      if (kw(toks[0]) !== "select") return { error: "当前语句不是 SELECT" };
+      for (let i = 0; i < toks.length; i++) {
+        const k = kw(toks[i]);
+        if (k && SQL_BAN_KW.has(k)) return { error: `含 ${k.toUpperCase()}，无法对应到单表` };
+        if (toks[i].type === T.IDENT && !toks[i].quoted && SQL_AGG_RE.test(toks[i].value) && toks[i + 1]?.text === "(") {
+          return { error: "含聚合函数，结果行不对应单表" };
+        }
+      }
+      let depth = 0, fromIdx = -1;
+      for (let i = 1; i < toks.length && fromIdx < 0; i++) {
+        if (toks[i].type === T.PUNCT && toks[i].text === "(") depth++;
+        else if (toks[i].type === T.PUNCT && toks[i].text === ")") depth--;
+        else if (depth === 0 && kw(toks[i]) === "from") fromIdx = i;
+      }
+      if (fromIdx < 0) return { error: "没有 FROM，不是表查询" };
+      const first = toks[fromIdx + 1];
+      if (!first || (first.type === T.PUNCT && first.text === "(")) return { error: "FROM 是子查询，无法对应单表" };
+      const qn = readQualified(toks, fromIdx + 1);
+      if (!qn) return { error: "无法识别 FROM 中的表名" };
+      let j = qn.next;
+      if (kw(toks[j]) === "as") j++;
+      if (toks[j] && toks[j].type === T.IDENT) j++;
+      if (toks[j] && !SQL_AFTER_FROM.has(kw(toks[j]))) return { error: "FROM 含多个数据源" };
+      const schemaPart = qn.schema ? renderIdent(fold(qn.schema, qn.schemaQuoted)) + "." : "";
+      const hit = core?.graph ? resolveRelation(core.graph, qn.name, qn.quoted, qn.schema) : { rel: null, ambiguous: false };
+      if (hit.ambiguous) return { error: "同名表位于多个 schema，请在 SQL 中写明 schema" };
+      if (hit.rel) return { rel: hit.rel, tableSql: schemaPart + renderIdent(hit.rel.name) };
+      return { rel: null, tableSql: schemaPart + renderIdent(fold(qn.name, qn.quoted)) };
+    }
+
+    function sqlLiteral(val, type) {
+      if (val === null) return "NULL";
+      const s = (typeof val === "object" ? JSON.stringify(val) : String(val)).trim();
+      const t = normalizeType(type || "");
+      if (SQL_NUM_TYPE_RE.test(t) && SQL_NUM_VAL_RE.test(s)) return s;
+      if (t === "boolean" && /^(true|false)$/i.test(s)) return s.toLowerCase();
+      return "'" + (typeof val === "object" ? JSON.stringify(val) : String(val)).replace(/'/g, "''") + "'";
+    }
+
+    function sqlCell(row, name) {
+      const v = row[name];
+      if (v === undefined) throw new Error(`选中区域缺少列 ${name} 的值`);
+      return v;
+    }
+
+    /** 结果列映射到表结构；别名或表达式列无法对应，直接报错。 */
+    function sqlColumns(cols, rel) {
+      return cols.map((c) => {
+        const name = c.key || c.name;
+        const tcol = rel ? rel.columns.find((x) => x.name === name) : null;
+        if (rel && !tcol) throw new Error(`结果列 ${name} 不在表 ${rel.name} 中（可能是别名或表达式）`);
+        return { name, type: tcol ? tcol.type : (c.type || c.cell || "") };
+      });
+    }
+
+    function pkColumnsOf(rel) {
+      if (!rel) throw new Error("需要先导入 DDL 快照以获取主键（PG 面板 → 快照）");
+      if (!rel.pk.length) throw new Error(`表 ${rel.name} 没有主键`);
+      const pkCols = rel.pk.map((k) => rel.columnByKey[k]);
+      return pkCols;
+    }
+
+    function checkPkInRows(rows, pkCols) {
+      const missing = pkCols.find((pc) => rows.some((r) => r[pc.name] === undefined));
+      if (missing) throw new Error(`结果缺少主键列 ${missing.name}，请在查询中包含它`);
+    }
+
+    function pkWhere(row, pkCols) {
+      return pkCols.map((pc) => {
+        const v = sqlCell(row, pc.name);
+        if (v === null) throw new Error(`主键 ${pc.name} 为 NULL`);
+        return `${renderIdent(pc.name)} = ${sqlLiteral(v, pc.type)}`;
+      }).join(" AND ");
+    }
+
+    /** 返回语句数组；不能生成时抛出带原因的 Error（菜单项据此禁用）。 */
+    function generateSql(mode, sel, src) {
+      if (src.error) throw new Error(src.error);
+      if (!sel || !sel.rows.length || !sel.cols.length) throw new Error("请先选中单元格");
+      if (sel.rows.length > SQL_ROW_LIMIT) throw new Error(`选中 ${sel.rows.length} 行，超过 ${SQL_ROW_LIMIT} 行上限`);
+      const { rel, tableSql } = src;
+      const rows = sel.rows;
+      const cols = sqlColumns(sel.cols, rel);
+      const colList = cols.map((c) => renderIdent(c.name)).join(", ");
+
+      if (mode === "sql-insert") {
+        return rows.map((r) => `INSERT INTO ${tableSql} (${colList}) VALUES (${cols.map((c) => sqlLiteral(sqlCell(r, c.name), c.type)).join(", ")});`);
+      }
+      if (mode === "sql-update" || mode === "sql-delete") {
+        const pkCols = pkColumnsOf(rel);
+        checkPkInRows(rows, pkCols);
+        if (mode === "sql-delete") return rows.map((r) => `DELETE FROM ${tableSql} WHERE ${pkWhere(r, pkCols)};`);
+        const setCols = cols.filter((c) => !pkCols.some((pc) => pc.name === c.name));
+        if (!setCols.length) throw new Error("选中区域只有主键列，没有可更新的列");
+        return rows.map((r) => {
+          const sets = setCols.map((c) => `${renderIdent(c.name)} = ${sqlLiteral(sqlCell(r, c.name), c.type)}`).join(", ");
+          return `UPDATE ${tableSql} SET ${sets} WHERE ${pkWhere(r, pkCols)};`;
+        });
+      }
+      if (mode === "sql-select") {
+        const pkCols = rel && rel.pk.length ? rel.pk.map((k) => rel.columnByKey[k]) : null;
+        if (pkCols && rows.every((r) => pkCols.every((pc) => r[pc.name] !== undefined && r[pc.name] !== null))) {
+          const lit = (r) => pkCols.map((pc) => sqlLiteral(r[pc.name], pc.type));
+          const lhs = pkCols.length === 1 ? renderIdent(pkCols[0].name) : `(${pkCols.map((pc) => renderIdent(pc.name)).join(", ")})`;
+          const rhs = pkCols.length === 1
+            ? `(${rows.map((r) => lit(r)[0]).join(", ")})`
+            : `(${rows.map((r) => `(${lit(r).join(", ")})`).join(", ")})`;
+          return [`SELECT ${colList}\nFROM ${tableSql}\nWHERE ${lhs} IN ${rhs};`];
+        }
+        if (rows.some((r) => cols.some((c) => r[c.name] === null || r[c.name] === undefined))) {
+          throw new Error("无主键且选中行含 NULL，无法生成精确的 WHERE 条件");
+        }
+        const rhs = `(${rows.map((r) => `(${cols.map((c) => sqlLiteral(r[c.name], c.type)).join(", ")})`).join(", ")})`;
+        return [`SELECT ${colList}\nFROM ${tableSql}\nWHERE (${colList}) IN ${rhs};`];
+      }
+      throw new Error("未知的生成类型");
+    }
+
+    function previewSql(stmts) {
+      const s = stmts[0].replace(/\s+/g, " ");
+      return s.length > 160 ? s.slice(0, 160) + "…" : s;
+    }
+
+    function copySqlStatements(doc, mode) {
+      const core = window[NS];
+      let stmts;
+      try {
+        stmts = generateSql(mode, extractGridSelection(doc), resolveSqlSource());
+      } catch (e) {
+        core && core.toast(`无法生成：${e.message}`);
+        return false;
+      }
+      if (!writeClipboard(stmts.join("\n"))) {
+        core && core.toast("复制失败：浏览器未允许写入剪贴板");
+        return false;
+      }
+      core && core.toast(`已复制 ${stmts.length} 条语句`);
+      return true;
+    }
+
+    /** 右键菜单「SQL」组中的四个生成项；不能生成的项禁用，副文本给出原因。 */
+    function addSqlItems(doc, menu) {
+      const sel = extractGridSelection(doc);
+      const src = resolveSqlSource();
+      const items = [
+        ["sql-insert", "INSERT", "每行一条 · 所选列"],
+        ["sql-update", "UPDATE", "按主键定位 · 所选非主键列"],
+        ["sql-delete", "DELETE", "按主键定位 · 每行一条"],
+        ["sql-select", "SELECT", "精确 WHERE 条件"],
+      ];
+      for (const [mode, label, sub] of items) {
+        let stmts = null, reason = null;
+        try { stmts = generateSql(mode, sel, src); } catch (e) { reason = e.message; }
+        addMenuItem(doc, menu, {
+          mode, icon: "sql", label: `生成 ${label}`,
+          sub: reason || sub,
+          hint: stmts ? `${stmts.length} 条` : "",
+          disabled: !!reason,
+          title: reason || previewSql(stmts),
+        });
+      }
+    }
+
     let activeMenu = null;
     const hideMenu = () => {
       activeMenu?.remove();
@@ -3065,12 +3255,14 @@
       menu.appendChild(head);
     }
 
-    function addMenuItem(doc, menu, { mode, icon, label, sub, hint }) {
+    function addMenuItem(doc, menu, { mode, icon, label, sub, hint, disabled, title }) {
       const item = doc.createElement("button");
       item.type = "button";
       item.setAttribute("role", "menuitem");
       item.className = "pg4-menu-item";
       item.dataset.pg4CopyMode = mode;
+      item.disabled = !!disabled;
+      if (title) item.title = title;
       item.innerHTML = `<span class="pg4-menu-ic">${MENU_ICON[icon] || MENU_ICON.data}</span>`
         + `<span class="pg4-menu-label"><span>${escapeHtml(label)}</span>`
         + (sub ? `<i>${escapeHtml(sub)}</i>` : "") + "</span>"
@@ -3097,7 +3289,7 @@
     }
 
     /**
-     * 结果区右键菜单：完整复制选项。
+     * 结果区右键菜单：复制、导出格式与 SQL 生成。
      * 工具栏的「复制 / 复制选项」保持 pgAdmin 原版，我们只在右键这一处提供入口。
      */
     function showCopyMenu(doc, x, y) {
@@ -3109,8 +3301,12 @@
       menu.style.left = `${x}px`;
       menu.style.top = `${y}px`;
       menu.setAttribute("role", "menu");
-      menu.setAttribute("aria-label", "复制选项");
-      addMenuHead(doc, menu, "复制选项", sum.text);
+      menu.setAttribute("aria-label", "复制与生成");
+      addMenuHead(doc, menu, "复制与生成", sum.text);
+      const grpCopy = doc.createElement("div");
+      grpCopy.className = "pg4-menu-grp";
+      grpCopy.textContent = "复制";
+      menu.appendChild(grpCopy);
       const choices = [
         ["withHeaders", "复制列名和数据", "含表头 · 制表符分隔", "默认"],
         ["data", "仅复制数据", "不含表头"],
@@ -3142,8 +3338,9 @@
       menu.appendChild(rule);
       const grp = doc.createElement("div");
       grp.className = "pg4-menu-grp";
-      grp.textContent = "SQL 片段";
+      grp.textContent = "SQL";
       menu.appendChild(grp);
+      addSqlItems(doc, menu);
       addMenuItem(doc, menu, {
         mode: "in", icon: "sql", label: "复制为 IN (…) 条件",
         sub: `去重 · 带引号 · ${sum.colLabel}`, hint: `${sum.rows} 项`,
@@ -3158,7 +3355,7 @@
       clampToViewport(menu);
       menu.querySelector("button")?.focus();
       menu.addEventListener("keydown", (ev) => {
-        const items = [...menu.querySelectorAll('[role="menuitem"]')];
+        const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];
         const index = items.indexOf(doc.activeElement);
         if (ev.key === "Escape") {
           ev.preventDefault();
