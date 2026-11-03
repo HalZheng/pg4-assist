@@ -51,6 +51,16 @@
 
 ## 代码层（摘要，详见 AGENTS.md「关键坑」）
 
+- **CM6 `inputHandler` 在插入前执行**：做词法判断（是否在字符串/注释内）时要把将输入的字符拼进前缀，否则判断滞后一个字符。
+- **输入法（IME）上屏不经过 `inputHandler`**，要用 `transactionFilter`；但组合期间的事务（`userEvent` 为 `input.type.compose`）**绝不能改写**：CM6 会按 DOM 预编辑文本回填，改写后会产生重复字符（`；` → `;;`）。正确做法是跳过 compose 事务，在 `compositionend` 之后延迟检查光标前文本再转换。`tr.isUserEvent("input.type")` 对 compose 也返回 true（前缀匹配），必须显式排除。
+- **mined CM6 模块缓存必须按文档、并校验类身份**：iframe 刷新后 WindowProxy 不变，按 `win` 缓存会拿到旧文档的 `EditorState`，`appendConfig` 被静默忽略。校验 `view.state.constructor === M.state.EditorState`。
+- **CDP `Input.insertText` 不会触发 closeBrackets 自动配对**；只有 keydown 路径（`keyboard.type("'")`）才会配对 ASCII 引号。测 IME 成对符号时，`（）` 上屏后光标在括号中间，再按 ArrowLeft 会移到最前，这是测试步骤问题而非代码问题。
+- **Playwright 截图拍不到 HTML5 拖拽图标与 drop caret**（OS 级拖拽层）；只能用 `getComputedStyle` 验证样式，视觉需用户本机确认。
+- **输入法成对上屏（如 `（）`）常会紧接着发送 ArrowLeft 把光标放到中间**。转换时不要显式设置光标（同步 `selection: {anchor: from+1}` 会被随后到达的 ArrowLeft 再左移一格，光标跳到最左侧，实测延迟 150ms 的 ArrowLeft 即可复现）。成对符号是等长替换，应保留当前光标（`selection` 取原位置），让输入法自己的 ArrowLeft 把光标放到中间。代价：完全不发送 ArrowLeft 的输入法，光标会停在末尾。组合上屏的转换仍需延迟到 `compositionend` 后约 80ms，并用组合范围（随事务映射）而非光标位置定位。
+- **捕获阶段 `stopImmediatePropagation` 的 drop 会让 CM6 的 drop 收尾不执行**，drop 光标残留。补发一次 `dragleave`（`new DragEvent("dragleave", {bubbles:true})`，派发到 `.cm-content`）即可清除；`dragend` 无效。
+- **pgAdmin 自带的 CM6 `drop` 处理器对结果表头拖入会抛错**（`Cannot read properties of undefined (reading 'from')`），CM6 默认插入随之中断。拖拽列名必须在捕获阶段拦截 `drop`（`stopImmediatePropagation` + 自行 `dispatch`），不能依赖默认行为。
+- **Playwright 注入站点脚本**：站点 CSP 拦截内联脚本，用 `page.route` 托管同源 URL 再动态创建 `<script src>`，加载后 `unroute`。
+
 - Query Tool 在**同源 iframe** 里，外层 DIV 与 IFRAME **共用同一个 id** → 必须 `querySelectorAll('iframe')`。
 - 取真 `__webpack_require__` 只能走 `webpackChunk.push` 第三个回调；**不能**重放 module factory。
 - **不能** `appendConfig(autocompletion({override}))`（Config merge conflict），只能就地替换已解析配置的 `override[0]`。
