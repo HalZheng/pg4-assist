@@ -58,6 +58,9 @@
 - **Playwright 截图拍不到 HTML5 拖拽图标与 drop caret**（OS 级拖拽层）；只能用 `getComputedStyle` 验证样式，视觉需用户本机确认。
 - **输入法成对上屏（如 `（）`）常会紧接着发送 ArrowLeft 把光标放到中间**。转换时不要显式设置光标（同步 `selection: {anchor: from+1}` 会被随后到达的 ArrowLeft 再左移一格，光标跳到最左侧，实测延迟 150ms 的 ArrowLeft 即可复现）。成对符号是等长替换，应保留当前光标（`selection` 取原位置），让输入法自己的 ArrowLeft 把光标放到中间。代价：完全不发送 ArrowLeft 的输入法，光标会停在末尾。组合上屏的转换仍需延迟到 `compositionend` 后约 80ms，并用组合范围（随事务映射）而非光标位置定位。
 - **捕获阶段 `stopImmediatePropagation` 的 drop 会让 CM6 的 drop 收尾不执行**，drop 光标残留。补发一次 `dragleave`（`new DragEvent("dragleave", {bubbles:true})`，派发到 `.cm-content`）即可清除；`dragend` 无效。
+- **同一 iframe 里可能残留多个已连接的编辑器会话**。取「当前编辑器」时不能取第一个或最后一个：优先 `view.hasFocus`，其次可见（`getClientRects().length`）且非空。否则会读到空的旧会话（实测菜单误报「编辑器为空」）。
+- **DOM 路径的选区行对象只含选中的列**，缺主键会导致 UPDATE / DELETE 无法生成。用 fiber 的 `rowsState[aria-rowindex - 2]` 补齐未选中的键（只补缺失键，不覆盖显示值，不影响现有复制结果）。
+- **Query Tool 的临时表在每次 F5 之间会消失**，测试 DML 生成请用真实表 + 只含该表的 DDL 快照。`grantPermissions` 在该测试环境不可用，剪贴板内容用包装 `document.execCommand("copy")` 读取 `activeElement.value`。
 - **pgAdmin 自带的 CM6 `drop` 处理器对结果表头拖入会抛错**（`Cannot read properties of undefined (reading 'from')`），CM6 默认插入随之中断。拖拽列名必须在捕获阶段拦截 `drop`（`stopImmediatePropagation` + 自行 `dispatch`），不能依赖默认行为。
 - **Playwright 注入站点脚本**：站点 CSP 拦截内联脚本，用 `page.route` 托管同源 URL 再动态创建 `<script src>`，加载后 `unroute`。
 
