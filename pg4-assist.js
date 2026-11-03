@@ -27,7 +27,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.4.2";
+  const VERSION = "2.4.3";
   const NS = "__pg4Assist";
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -64,6 +64,9 @@
     diagMissingWhere: true,
 
     smartPasteEnabled: true,
+
+    /** 输入全角标点（，；“”‘’）时自动换成英文标点；字符串、注释、带引号标识符内不转换 */
+    chinesePunctReplace: true,
 
     /** 结果网格复制单单元格时自动去除外层双引号 */
     gridUnquoteSingleCell: true,
@@ -1760,6 +1763,61 @@
     return "'" + s.replace(/'/g, "''") + "'";
   }
 
+  /** 全角标点 → 英文标点（单个字符） */
+  const CJK_PUNCT = {
+    "，": ",", "；": ";", "：": ":", "？": "?", "！": "!", "。": ".",
+    "“": '"', "”": '"', "‘": "'", "’": "'",
+    "（": "(", "）": ")", "《": "<", "》": ">", "【": "[", "】": "]", "＿": "_",
+  };
+  /** 输入法自动配对上屏的一对符号：转换后光标落在两者之间 */
+  const CJK_PAIR = { "（）": "()", "“”": '""', "‘’": "''", "《》": "<>", "【】": "[]" };
+  /** 中文破折号成对（——）按下划线处理 */
+  const CJK_DASH_PAIR = { "——": "_" };
+  /** 未闭合字符串里，哪个全角字符是该引号的闭合（只有它会被替换） */
+  const CLOSING_QUOTE = { "'": "’", '"': "”" };
+
+  /**
+   * 把一次键入 / 上屏的文本映射为英文标点。返回 { ascii, inside }，inside 表示光标应落在中间；不是标点则返回 null。
+   */
+  function cjkPunctMapping(text) {
+    if (CJK_DASH_PAIR[text]) return { ascii: CJK_DASH_PAIR[text], inside: false };
+    if (CJK_PAIR[text]) return { ascii: CJK_PAIR[text], inside: true };
+    const chars = [...text];
+    if (chars.length && chars.every((c) => CJK_PUNCT[c])) {
+      return { ascii: chars.map((c) => CJK_PUNCT[c]).join(""), inside: false };
+    }
+    return null;
+  }
+
+  /**
+   * prefix（光标前的全部文本）末尾是否落在未闭合的字符串 / 注释里。
+   * 返回 { quote } 表示在字符串里，quote 为其引号；{ quote: null } 表示在注释里；null 表示在代码区。
+   */
+  function openLiteralAt(prefix) {
+    let last = null;
+    for (const t of tokenize(prefix, { keepComments: true })) last = t;
+    if (!last || last.to !== prefix.length) return null;
+    if (last.type === T.STRING && last.closed === false) return { quote: "'" };
+    if (last.type === T.IDENT && last.quoted && last.closed === false) return { quote: '"' };
+    if (last.type === T.COMMENT) {
+      const closedBlock = !last.text.startsWith("--") && last.text.length >= 4 && last.text.endsWith("*/");
+      if (!closedBlock) return { quote: null };
+    }
+    return null;
+  }
+
+  /**
+   * 判断在 prefix 之后键入 text 时是否应换成英文标点。
+   * 代码区全部替换；字符串 / 注释内保持原样，唯一例外是字符串的闭合引号（如 ’ 结束 'abc）。
+   */
+  function cjkPunctReplacement(prefix, text) {
+    const m = cjkPunctMapping(text);
+    if (!m) return null;
+    const lit = openLiteralAt(prefix);
+    if (lit && !(lit.quote && CLOSING_QUOTE[lit.quote] === text)) return null;
+    return m;
+  }
+
   /**
    * 决定粘贴内容如何转换。返回 null 表示按原样粘贴。
    */
@@ -2010,9 +2068,17 @@
       },
     });
 
+    // 用 transactionFilter 而非 inputHandler：输入法组合上屏不经过 inputHandler，会导致重复输入。
+    // 注意：挖掘到的 M.state 与页面视图实际使用的 EditorState 可能不是同一模块副本，facet 对不上时会被静默忽略，
+    // 因此必须取视图自身状态类上的 transactionFilter。
+    const EditorStateCls = view.state.constructor;
+    const punctFilter = EditorStateCls.transactionFilter.of((tr) =>
+      slot.session ? slot.session.onInputTransaction(tr) : tr
+    );
+
     view.dispatch({
       effects: S.StateEffect.appendConfig.of([
-        diagField, hover, listener, handlers, V.EditorView.baseTheme(BASE_THEME_SPEC),
+        diagField, hover, listener, handlers, punctFilter, V.EditorView.baseTheme(BASE_THEME_SPEC),
       ]),
     });
 
@@ -2077,6 +2143,11 @@
         if (!this.pendingTab) this.acceptWhenReady();
       };
       this.win.addEventListener("keydown", this.onPendingTabKeyDown, true);
+      // 输入法上屏结束后再统一转换（组合期间不改写，见 onInputTransaction）
+      this.onCompositionStart = () => { const r = view.state.selection.main; this.comp = { from: r.from, to: r.to, closed: false }; };
+      this.onCompositionEnd = () => { if (this.comp) this.comp.closed = true; this.scheduleCommitConvert(); };
+      view.contentDOM.addEventListener("compositionstart", this.onCompositionStart);
+      view.contentDOM.addEventListener("compositionend", this.onCompositionEnd);
       view.dom.setAttribute("data-pg4", this.id);
       this.refreshDiagnostics();
       return this;
@@ -2369,11 +2440,85 @@
       return true;
     }
 
+    /**
+     * 键入 / 输入法上屏的全角标点：在 transactionFilter 中改写为英文标点。
+     * 只处理单个用户键入事务（input.type）；组合输入（input.type.compose）不在此处理，见 scheduleCommitConvert。保留 userEvent，补全触发不受影响。
+     */
+    onInputTransaction(tr) {
+      const c = this.comp;
+      if (c && tr.docChanged) {
+        // 上屏前的组合事务向外扩展；上屏后的普通输入不扩展范围
+        const open = !c.closed || tr.isUserEvent("input.type.compose");
+        this.comp = { from: tr.changes.mapPos(c.from, open ? -1 : 1), to: tr.changes.mapPos(c.to, open ? 1 : -1), closed: c.closed };
+      }
+      // 组合输入期间的事务不改写：预编辑文本与 DOM 由输入法维护，改写会错位并产生重复字符
+      if (!currentConfig.chinesePunctReplace || !tr.docChanged || !tr.isUserEvent("input.type") || tr.isUserEvent("input.type.compose")) return tr;
+      let change = null, count = 0;
+      tr.changes.iterChanges((fromA, toA, _fromB, _toB, ins) => {
+        count++;
+        change = { fromA, toA, text: ins.toString() };
+      });
+      if (count !== 1 || !change.text) return tr;
+      let { fromA, toA, text } = change;
+      // 逐字键入中文破折号时，第二个 — 到达后把前一个并入，按 —— 处理
+      if (text === "—" && fromA > 0 && tr.startState.doc.sliceString(fromA - 1, fromA) === "—") {
+        fromA -= 1;
+        text = "——";
+      }
+      const m = cjkPunctReplacement(tr.startState.doc.sliceString(0, fromA), text);
+      if (!m) return tr;
+      // 等长替换不改变光标：输入法随后发出的 ArrowLeft 才能把光标放到成对符号中间
+      const same = m.ascii.length === text.length;
+      const sel = tr.selection ? tr.selection.main : null;
+      return [{
+        changes: { from: fromA, to: toA, insert: m.ascii },
+        selection: same && sel ? { anchor: sel.anchor, head: sel.head } : { anchor: fromA + m.ascii.length },
+        effects: tr.effects,
+        scrollIntoView: tr.scrollIntoView,
+        // 用事务自身的 Transaction 类读取 annotation，避免跨模块副本取到 undefined
+        userEvent: tr.annotation(tr.constructor.userEvent),
+      }];
+    }
+
+    /** 输入法上屏结束（compositionend）后延迟检查，等待 CM6 把 DOM 变更读回文档 */
+    scheduleCommitConvert() {
+      clearTimeout(this._commitTimer);
+      this._commitTimer = setTimeout(() => this.convertCommitted(), 80);
+    }
+
+    /** 转换本次组合上屏的范围；不依赖光标位置，因为输入法可能在上屏后立即发送 ArrowLeft */
+    convertCommitted() {
+      const range = this.comp;
+      this.comp = null;
+      if (this.destroyed || !range || !currentConfig.chinesePunctReplace || this.view.composing) return;
+      const view = this.view;
+      const { from, to } = range;
+      const sel = view.state.selection.main;
+      if (to <= from || !sel.empty || sel.head < from || sel.head > to) return;
+      const doc = view.state.doc;
+      const m = cjkPunctReplacement(doc.sliceString(0, from), doc.sliceString(from, to));
+      if (!m) return;
+      const same = m.ascii.length === to - from;
+      view.dispatch({
+        changes: { from, to, insert: m.ascii },
+        selection: same ? { anchor: sel.anchor, head: sel.head } : { anchor: from + m.ascii.length },
+        userEvent: "input.type",
+      });
+    }
+
+    /** 兼容：旧版注入在已打开的编辑器里留下的 inputHandler 仍会调用此方法，保持空操作 */
+    onTypedText() {
+      return false;
+    }
+
     destroy() {
       this.destroyed = true;
       this.trigger && this.trigger.cancel();
       this.clearPendingTab();
       if (this.onPendingTabKeyDown) this.win.removeEventListener("keydown", this.onPendingTabKeyDown, true);
+      if (this.onCompositionStart) this.view.contentDOM.removeEventListener("compositionstart", this.onCompositionStart);
+      if (this.onCompositionEnd) this.view.contentDOM.removeEventListener("compositionend", this.onCompositionEnd);
+      clearTimeout(this._commitTimer);
       this.runDiag && this.runDiag.cancel();
       // 已 append 的扩展无法撤销，只能把插槽置空让它们变成空操作；
       // 补全 override 则还原成 pgAdmin 原本的服务端源。
@@ -2448,7 +2593,7 @@
    * 2. 补丁 pgAdmin 结果网格在单单元格选中时键盘 Ctrl+C (Cmd+C) 缺失响应的问题（pgAdmin 自身的快捷键判定 bug）。
    * 3. 结果单元格右键菜单：列名/数据/IN 条件之外的导出格式（CSV / JSON / Markdown）。
    */
-  const GRID_HOOK_REV = 14;
+  const GRID_HOOK_REV = 17;
 
   // 结果区右键菜单的外观。不碰 pgAdmin 的工具栏按钮，所以配色只需满足两点：
   // 底/字色沿用 rdg 的 --color-bg / --color-fg；边框与分隔线用半透明中性灰，明暗主题下都不刺眼。
@@ -2487,7 +2632,12 @@
   border: 1px solid rgba(127,127,127,.34); font-family: ui-monospace, Consolas, monospace;
   font-size: 9.5px; opacity: .62; }
 .pg4-menu-foot { padding: 4px 12px; font-size: 9.5px; opacity: .58;
-  border-top: 1px solid rgba(127,127,127,.24); background: rgba(127,127,127,.07); }`;
+  border-top: 1px solid rgba(127,127,127,.24); background: rgba(127,127,127,.07); }
+.pg4-drag-ghost { position: fixed; left: 0; top: 0; z-index: -1; pointer-events: none; box-sizing: border-box;
+  padding: 2px 8px; border-radius: 4px; background: ${PG4_ACCENT}; color: #fff; opacity: 1;
+  font: 12px ui-monospace, Consolas, monospace; white-space: nowrap; }
+/* CM6 默认 drop 光标在暗色主题下是黑色细线，看不清：改用强调色，宽度与输入光标一致。 */
+.cm-dropCursor { border-left: 1.2px solid ${PG4_ACCENT} !important; }`;
 
   // 菜单图标：15px 下要能分辨，用「表头色带」区分是否含列名，SQL 图标用尖括号。
   const MENU_ICON = {
@@ -3075,12 +3225,65 @@
       if (activeMenu && !activeMenu.contains(ev.target)) hideMenu();
     };
 
+    // 结果表头列名可拖到编辑器。浏览器只对 mousedown 前已 draggable 的元素起拖拽，
+    // 因此在 pointerdown 时才打标记，不给整张表常驻 draggable。
+    const HEADER_KEY_SEL = '.rdg-cell[role="columnheader"] [data-column-key]';
+    const onHeaderPointerDown = (ev) => {
+      const el = eventEl(ev)?.closest?.(HEADER_KEY_SEL);
+      if (el) el.setAttribute("draggable", "true");
+    };
+    const HEADER_DRAG_MIME = "application/x-pg4-column";
+    const onHeaderDragStart = (ev) => {
+      const el = eventEl(ev)?.closest?.(HEADER_KEY_SEL);
+      if (!el || !ev.dataTransfer) return;
+      const name = el.getAttribute("data-column-key") || el.textContent || "";
+      ev.dataTransfer.setData(HEADER_DRAG_MIME, "1");
+      ev.dataTransfer.setData("text/plain", renderIdent(name));
+      ev.dataTransfer.effectAllowed = "copy";
+      // 拖拽影子用一个独立的小标签，并让光标落在它的左上角（与 pgAdmin 对象浏览器一致），
+      // 不遮挡光标下方的文本。影子元素在下一个任务里移除，浏览器已在 dragstart 中截图。
+      const doc = el.ownerDocument;
+      const ghost = doc.createElement("div");
+      ghost.className = "pg4-drag-ghost";
+      ghost.textContent = name;
+      doc.body.appendChild(ghost);
+      try { ev.dataTransfer.setDragImage(ghost, 0, 0); } catch { /* ignore */ }
+      win.setTimeout(() => ghost.remove(), 0);
+    };
+    // pgAdmin 自带的 CM6 drop 处理器对表头拖入会抛错（读取 undefined.from），
+    // 其后的 CM6 默认插入逻辑随之中断，文本不会落入编辑器。
+    // 因此在捕获阶段接管本次拖拽：自行插入文本并阻止后续处理器。
+    const onHeaderDrop = (ev) => {
+      const dt = ev.dataTransfer;
+      if (!dt || !dt.types || !Array.from(dt.types).includes(HEADER_DRAG_MIME)) return;
+      const content = eventEl(ev)?.closest?.(".cm-content");
+      const cmHost = content && (content.cmTile || content.cmView);
+      const view = cmHost && cmHost.view;
+      if (!view || typeof view.dispatch !== "function") return;
+      const text = dt.getData("text/plain");
+      if (!text) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      const pos = view.posAtCoords({ x: ev.clientX, y: ev.clientY }) ?? view.state.selection.main.head;
+      view.dispatch({
+        changes: { from: pos, to: pos, insert: text },
+        selection: { anchor: pos + text.length },
+        userEvent: "input.drop",
+      });
+      view.focus();
+      // 上面已阻止 CM6 自身的 drop 收尾，这里补发 dragleave 让它清除 drop 光标
+      content.dispatchEvent(new (content.ownerDocument.defaultView.DragEvent)("dragleave", { bubbles: true }));
+    };
+
     try {
       win.addEventListener("keydown", onKeydown, true);
       win.addEventListener("mousedown", onGridMouseDown, true);
       win.addEventListener("contextmenu", onContextMenu, true);
       win.addEventListener("click", onDocClick, true);
       win.addEventListener("pointerdown", onOutsidePointerDown, true);
+      win.addEventListener("pointerdown", onHeaderPointerDown, true);
+      win.addEventListener("dragstart", onHeaderDragStart, true);
+      win.addEventListener("drop", onHeaderDrop, true);
       if (win.document?.head) ensureMenuStyle(win.document);
     } catch { /* ignore */ }
 
@@ -3092,6 +3295,9 @@
         win.removeEventListener("contextmenu", onContextMenu, true);
         win.removeEventListener("click", onDocClick, true);
         win.removeEventListener("pointerdown", onOutsidePointerDown, true);
+        win.removeEventListener("pointerdown", onHeaderPointerDown, true);
+        win.removeEventListener("dragstart", onHeaderDragStart, true);
+        win.removeEventListener("drop", onHeaderDrop, true);
         hideMenu();
         // 以下几段清理 rev<=10 遗留的工具栏改写（改色 class、被覆盖的 title / aria-label、
         // 早期版本插入的独立 IN 按钮、旧 id 的样式节点）。当前版本不再改写工具栏，但重跑时要还原旧痕迹。
@@ -3511,6 +3717,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
         </div>
         <div class="sec"><h3>其他</h3>
           ${chk("smartPasteEnabled", "智能粘贴（自动加单引号 / 转 IN 列表）")}
+          ${chk("chinesePunctReplace", "输入全角标点自动转英文（，；“”‘’，字符串 / 注释内不转）")}
           ${chk("gridUnquoteSingleCell", "结果单元格复制自动去外层双引号", "单选单元格复制时保留纯净数据，避免意外带上 CSV 双引号")}
           ${chk("historyEnabled", "记录查询历史（观察 pgAdmin 执行上报）")}
           ${chk("debug", "调试日志")}
@@ -3604,7 +3811,7 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
       this.usageCache = null;
       this.panel = null;
       this.disposed = false;
-      this.moduleCache = new WeakMap(); // window -> M
+      this.moduleCache = new WeakMap(); // document -> M（iframe 重载后 document 会换新，WindowProxy 则不变）
       this.observers = [];
       this.channel = null;
     }
@@ -3779,11 +3986,18 @@ select { background: #0d1117; border: 1px solid #30363d; color: #d7dde5; border-
 
     // ── 编辑器接管 ────────────────────────────────────────────────────────
     getModules(win, view) {
-      if (this.moduleCache.has(win)) return this.moduleCache.get(win);
+      // 以 document 为键：iframe 重载后 WindowProxy 不变，但 document 与 webpack 运行时都是新的。
+      // 若沿用旧缓存，新视图的 EditorState 与挖掘到的副本不一致，appendConfig 会被静默忽略。
+      // 因此命中缓存时还要校验视图的状态类是否属于该副本，不一致则重新定位。
+      const key = win.document;
+      if (this.moduleCache.has(key)) {
+        const cached = this.moduleCache.get(key);
+        if (!cached || !view || view.state.constructor === cached.state.EditorState) return cached;
+      }
       const req = grabWebpackRequire(win);
-      if (!req) { this.moduleCache.set(win, null); return null; }
+      if (!req) { this.moduleCache.set(key, null); return null; }
       const M = locateCm6Modules(req, view);
-      this.moduleCache.set(win, M);
+      this.moduleCache.set(key, M);
       if (!M) warn("未能在", win.location.pathname, "定位 CodeMirror 模块");
       return M;
     }
